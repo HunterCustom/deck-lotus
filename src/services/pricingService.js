@@ -27,7 +27,17 @@ export function getPrintingPrices(uuid) {
 /**
  * Get deck total price
  */
-export function getDeckPrice(deckId) {
+export function getDeckPrice(deckId, userId) {
+  const deck = db.get(
+    `SELECT id FROM decks WHERE id = ? AND user_id = ?`,
+    [deckId, userId]
+  );
+  if (!deck) {
+    const error = new Error('Deck not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
   // Prefer tcgplayer normal prices (sourced from MTGJSON weekly sync)
   const priceSubquery = `COALESCE(
     (SELECT price FROM prices WHERE printing_uuid = p.uuid AND provider = 'tcgplayer' AND price_type = 'normal' LIMIT 1),
