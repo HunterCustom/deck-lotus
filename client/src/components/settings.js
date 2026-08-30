@@ -1,5 +1,5 @@
 import api from '../services/api.js';
-import { showLoading, hideLoading, showModal, showToast, confirmDialog } from '../utils/ui.js';
+import { showLoading, hideLoading, showModal, showToast, confirmDialog, escapeHtml } from '../utils/ui.js';
 
 export function setupSettings() {
   const generateApiKeyBtn = document.getElementById('generate-api-key-btn');
@@ -338,11 +338,11 @@ function renderUsers(users) {
     <div class="user-item" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 0.5rem;">
       <div style="flex: 1;">
         <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <strong>${user.username}</strong>
+          <strong>${escapeHtml(user.username)}</strong>
           ${user.is_admin ? '<span class="badge" style="background: var(--primary); color: white; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.75rem;">Admin</span>' : ''}
         </div>
         <div style="font-size: 0.875rem; color: var(--text-secondary); margin-top: 0.25rem;">
-          ${user.email}<br>
+          ${escapeHtml(user.email)}<br>
           Created: ${new Date(user.created_at).toLocaleDateString()}
         </div>
       </div>
