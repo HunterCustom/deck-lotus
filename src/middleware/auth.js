@@ -1,4 +1,4 @@
-import { verifyToken } from '../utils/jwt.js';
+import { verifyAccessToken } from '../utils/jwt.js';
 import { validateApiKey } from '../services/authService.js';
 
 /**
@@ -10,7 +10,7 @@ export function authenticate(req, res, next) {
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
-    const decoded = verifyToken(token);
+    const decoded = verifyAccessToken(token);
 
     if (decoded) {
       req.user = {
@@ -51,7 +51,7 @@ export function optionalAuthenticate(req, res, next) {
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
-    const decoded = verifyToken(token);
+    const decoded = verifyAccessToken(token);
 
     if (decoded) {
       req.user = {
