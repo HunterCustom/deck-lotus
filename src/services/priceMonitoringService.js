@@ -158,15 +158,23 @@ async function checkWatch(watch) {
   }
 }
 
-export async function runPriceChecks() {
+export async function runPriceChecks(userId = null) {
   const db = getDb();
 
-  const watches = db.prepare(`
-    SELECT * FROM price_watches
-    WHERE is_active = 1
-      AND (expires_at IS NULL OR expires_at > datetime('now'))
-    ORDER BY last_checked ASC NULLS FIRST
-  `).all();
+  const watches = userId === null
+    ? db.prepare(`
+        SELECT * FROM price_watches
+        WHERE is_active = 1
+          AND (expires_at IS NULL OR expires_at > datetime('now'))
+        ORDER BY last_checked ASC NULLS FIRST
+      `).all()
+    : db.prepare(`
+        SELECT * FROM price_watches
+        WHERE user_id = ?
+          AND is_active = 1
+          AND (expires_at IS NULL OR expires_at > datetime('now'))
+        ORDER BY last_checked ASC NULLS FIRST
+      `).all(userId);
 
   if (!watches.length) {
     console.log('Price monitor: no active watches');
