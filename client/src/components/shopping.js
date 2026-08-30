@@ -1,5 +1,5 @@
 import api from '../services/api.js';
-import { showLoading, hideLoading, formatMana, showToast, showError } from '../utils/ui.js';
+import { showLoading, hideLoading, formatMana, showToast, showError, escapeHtml } from '../utils/ui.js';
 
 let selectedDeckIds = new Set();
 let shoppingData = null;
@@ -165,8 +165,8 @@ function renderDeckSelector() {
             ${selectedDeckIds.has(deck.id) ? 'checked' : ''}
             class="deck-checkbox"
           />
-          <span class="deck-selector-name">${deck.name}</span>
-          ${deck.format ? `<span class="deck-selector-format">${deck.format}</span>` : ''}
+          <span class="deck-selector-name">${escapeHtml(deck.name)}</span>
+          ${deck.format ? `<span class="deck-selector-format">${escapeHtml(deck.format)}</span>` : ''}
         </label>
       `).join('')}
     </div>
