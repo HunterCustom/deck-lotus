@@ -135,10 +135,10 @@ class ApiClient {
     return this.request(`/cards/${cardId}/ownership-usage`);
   }
 
-  async setOwnedPrintingQuantity(printingId, quantity) {
+  async setOwnedPrintingQuantity(printingId, quantity, replacementPrintingId = null) {
     return this.request(`/cards/printings/${printingId}/quantity`, {
       method: 'POST',
-      body: JSON.stringify({ quantity }),
+      body: JSON.stringify({ quantity, replacementPrintingId }),
     });
   }
 
