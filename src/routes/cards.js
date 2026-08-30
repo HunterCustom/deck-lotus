@@ -14,6 +14,7 @@ import {
   getCardOwnershipStatus,
   getCardOwnedPrintings,
   setOwnedPrintingQuantity,
+  swapOwnedPrinting,
   getCardOwnershipAndUsage,
 } from '../services/cardService.js';
 import { authenticate } from '../middleware/auth.js';
@@ -246,26 +247,37 @@ router.get('/:id/ownership-usage', authenticate, (req, res, next) => {
  * POST /api/cards/printings/:printingId/quantity
  * Set owned quantity for a specific printing
  */
+router.post('/printings/:printingId/swap', authenticate, (req, res, next) => {
+  try {
+    const fromPrintingId = parseInt(req.params.printingId);
+    const toPrintingId = parseInt(req.body.replacementPrintingId);
+
+    if (!Number.isInteger(toPrintingId)) {
+      return res.status(400).json({ error: 'replacementPrintingId is required' });
+    }
+
+    const result = swapOwnedPrinting(req.user.id, fromPrintingId, toPrintingId);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/cards/printings/:printingId/quantity
+ * Set owned quantity for a specific printing
+ */
 router.post('/printings/:printingId/quantity', authenticate, (req, res, next) => {
   try {
     const printingId = parseInt(req.params.printingId);
     const userId = req.user.id;
-    const { quantity, replacementPrintingId } = req.body;
+    const { quantity } = req.body;
 
     if (quantity === undefined || quantity === null) {
       return res.status(400).json({ error: 'Quantity is required' });
     }
 
-    const replacementId = replacementPrintingId === undefined || replacementPrintingId === null
-      ? null
-      : parseInt(replacementPrintingId);
-
-    const result = setOwnedPrintingQuantity(
-      userId,
-      printingId,
-      parseInt(quantity),
-      replacementId
-    );
+    const result = setOwnedPrintingQuantity(userId, printingId, parseInt(quantity));
     res.json(result);
   } catch (error) {
     next(error);
