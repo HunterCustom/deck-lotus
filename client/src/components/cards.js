@@ -1465,12 +1465,8 @@ async function showSwapPrintingModal(card, fromPrintingId, quantity, cardId, own
 
       try {
         showLoading();
-        // Remove from old printing
-        await api.setOwnedPrintingQuantity(fromPrintingId, 0, toPrintingId);
-        // Add to new printing (will add to existing if already owned)
-        const existingOwned = ownership.ownedPrintings.find(op => op.printing_id === toPrintingId);
-        const newQuantity = (existingOwned ? existingOwned.quantity : 0) + quantity;
-        await api.setOwnedPrintingQuantity(toPrintingId, newQuantity);
+        // Move inventory and matching deck usage together in one transaction.
+        await api.swapOwnedPrinting(fromPrintingId, toPrintingId);
 
         showToast('Printing changed!', 'success', 2000);
         window.dispatchEvent(new CustomEvent('inventory:refresh'));
