@@ -16,8 +16,9 @@ export function parseDeckList(text) {
     if (!trimmedLine) continue;
 
     // Check for section headers
-    if (/^(sideboard|commander|deck|companion)/i.test(trimmedLine)) {
+    if (/^(sideboard|maybeboard|commander|deck|companion)/i.test(trimmedLine)) {
       if (/^sideboard/i.test(trimmedLine)) currentSection = 'sideboard';
+      if (/^maybeboard/i.test(trimmedLine)) currentSection = 'maybeboard';
       if (/^commander/i.test(trimmedLine)) currentSection = 'commander';
       if (/^deck/i.test(trimmedLine)) currentSection = 'mainboard';
       continue;
@@ -28,6 +29,9 @@ export function parseDeckList(text) {
     if (parsed) {
       cards.push({
         ...parsed,
+        boardType: currentSection === 'maybeboard' ? 'maybeboard'
+          : currentSection === 'sideboard' ? 'sideboard'
+          : 'mainboard',
         isSideboard: currentSection === 'sideboard',
         isCommander: currentSection === 'commander'
       });
@@ -182,41 +186,48 @@ export function findCard(name, setCode = null, collectorNumber = null) {
  * Import deck from parsed card list
  */
 export function importDeck(userId, deckName, format, cardList) {
-  // Create deck
-  const result = db.prepare(
-    `INSERT INTO decks (user_id, name, format, created_at, updated_at)
-     VALUES (?, ?, ?, datetime('now'), datetime('now'))`
-  ).run(userId, deckName, format || '');
+  return db.transaction(() => {
+    const result = db.run(
+      `INSERT INTO decks (user_id, name, format, created_at, updated_at)
+       VALUES (?, ?, ?, datetime('now'), datetime('now'))`,
+      [userId, deckName, format || '']
+    );
 
-  const deckId = result.lastInsertRowid;
+    const deckId = result.lastInsertRowid;
 
-  // Add cards to deck
-  const insertCard = db.prepare(
-    `INSERT INTO deck_cards (deck_id, printing_id, quantity, is_sideboard, is_commander)
-     VALUES (?, ?, ?, ?, ?)`
-  );
+    const insertCard = db.prepare(
+      `INSERT INTO deck_cards (deck_id, printing_id, quantity, is_sideboard, is_commander, board_type)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(deck_id, printing_id, board_type) DO UPDATE SET
+         quantity = deck_cards.quantity + excluded.quantity,
+         is_commander = CASE WHEN excluded.is_commander = 1 THEN 1 ELSE deck_cards.is_commander END,
+         is_sideboard = excluded.is_sideboard`
+    );
 
-  // Process each card in the list
-  let imported = 0;
-  let notFound = 0;
+    let imported = 0;
+    let notFound = 0;
 
-  for (const cardData of cardList) {
-    const card = findCard(cardData.name, cardData.setCode, cardData.collectorNumber);
+    for (const cardData of cardList) {
+      const card = findCard(cardData.name, cardData.setCode, cardData.collectorNumber);
 
-    if (card) {
-      insertCard.run(
-        deckId,
-        card.printing_id,
-        cardData.quantity,
-        cardData.isSideboard ? 1 : 0,
-        cardData.isCommander ? 1 : 0
-      );
-      imported++;
-    } else {
-      notFound++;
-      console.warn(`Card not found: ${cardData.name}${cardData.setCode ? ` (${cardData.setCode})` : ''}${cardData.collectorNumber ? ` ${cardData.collectorNumber}` : ''}`);
+      if (card) {
+        const boardType = cardData.boardType || (cardData.isSideboard ? 'sideboard' : 'mainboard');
+        const isSideboard = boardType === 'sideboard' ? 1 : 0;
+        insertCard.run(
+          deckId,
+          card.printing_id,
+          cardData.quantity,
+          isSideboard,
+          cardData.isCommander ? 1 : 0,
+          boardType
+        );
+        imported++;
+      } else {
+        notFound++;
+        console.warn(`Card not found: ${cardData.name}${cardData.setCode ? ` (${cardData.setCode})` : ''}${cardData.collectorNumber ? ` ${cardData.collectorNumber}` : ''}`);
+      }
     }
-  }
 
-  return { deckId, imported, notFound };
+    return { deckId, imported, notFound };
+  });
 }
