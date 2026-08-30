@@ -1,4 +1,5 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import {
   registerUser,
   loginUser,
@@ -8,11 +9,19 @@ import {
   getUserById,
 } from '../services/authService.js';
 import { authenticate } from '../middleware/auth.js';
-import { verifyToken, generateTokens } from '../utils/jwt.js';
+import { verifyRefreshToken, generateTokens } from '../utils/jwt.js';
 import { isRegistrationEnabled } from '../services/settingsService.js';
 import db from '../db/connection.js';
 
 const router = express.Router();
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many authentication attempts. Please try again later.' },
+});
 
 /**
  * GET /api/auth/config
@@ -26,7 +35,7 @@ router.get('/config', (req, res) => {
  * POST /api/auth/register
  * Register a new user
  */
-router.post('/register', async (req, res, next) => {
+router.post('/register', authLimiter, async (req, res, next) => {
   try {
     if (!isRegistrationEnabled()) {
       return res.status(403).json({ error: 'Registration is disabled on this server' });
@@ -49,7 +58,7 @@ router.post('/register', async (req, res, next) => {
  * POST /api/auth/login
  * Login user
  */
-router.post('/login', async (req, res, next) => {
+router.post('/login', authLimiter, async (req, res, next) => {
   try {
     const { username, password } = req.body;
 
@@ -68,7 +77,7 @@ router.post('/login', async (req, res, next) => {
  * POST /api/auth/refresh
  * Refresh access token using refresh token
  */
-router.post('/refresh', (req, res, next) => {
+router.post('/refresh', authLimiter, (req, res, next) => {
   try {
     const { refreshToken } = req.body;
 
@@ -76,17 +85,22 @@ router.post('/refresh', (req, res, next) => {
       return res.status(400).json({ error: 'Refresh token is required' });
     }
 
-    const decoded = verifyToken(refreshToken);
+    const decoded = verifyRefreshToken(refreshToken);
 
     if (!decoded) {
       return res.status(401).json({ error: 'Invalid refresh token' });
     }
 
-    // Generate new tokens with isAdmin flag preserved
+    const user = getUserById(decoded.userId);
+    if (!user) {
+      return res.status(401).json({ error: 'User no longer exists' });
+    }
+
+    // Reload current account state so privilege changes take effect immediately.
     const tokens = generateTokens({
-      userId: decoded.userId,
-      username: decoded.username,
-      isAdmin: decoded.isAdmin || false
+      userId: user.id,
+      username: user.username,
+      isAdmin: !!user.is_admin
     });
     res.json(tokens);
   } catch (error) {
