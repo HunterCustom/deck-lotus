@@ -1,5 +1,6 @@
 import express from 'express';
 import { authenticate } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/adminAuth.js';
 import {
   getWatches,
   createWatch,
@@ -89,7 +90,7 @@ router.get('/:id/history', authenticate, (req, res, next) => {
 // Manually trigger a price check run (checks all active watches for this server)
 router.post('/check-now', authenticate, async (req, res, next) => {
   try {
-    const results = await runPriceChecks();
+    const results = await runPriceChecks(req.user.is_admin ? null : req.user.id);
     res.json({ results });
   } catch (err) {
     next(err);
@@ -100,7 +101,7 @@ router.get('/schedule', authenticate, (req, res) => {
   res.json({ schedule: getPriceCheckSchedule() });
 });
 
-router.post('/schedule', authenticate, (req, res, next) => {
+router.post('/schedule', authenticate, requireAdmin, (req, res, next) => {
   try {
     const { schedule } = req.body;
     if (!schedule) return res.status(400).json({ error: 'schedule is required' });
