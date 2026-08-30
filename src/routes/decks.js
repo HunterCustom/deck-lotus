@@ -139,7 +139,7 @@ router.get('/:id/stats', authenticate, (req, res, next) => {
 router.get('/:id/price', authenticate, (req, res, next) => {
   try {
     const deckId = parseInt(req.params.id);
-    const price = getDeckPrice(deckId);
+    const price = getDeckPrice(deckId, req.user.id);
     res.json(price);
   } catch (error) {
     next(error);
