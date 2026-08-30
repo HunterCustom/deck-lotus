@@ -1,81 +1,63 @@
 import { verifyAccessToken } from '../utils/jwt.js';
-import { validateApiKey } from '../services/authService.js';
+import { validateApiKey, getUserById } from '../services/authService.js';
 
-/**
- * Authentication middleware - supports JWT and API key
- */
+function authenticateJwt(authHeader) {
+  if (!authHeader?.startsWith('Bearer ')) return null;
+  const decoded = verifyAccessToken(authHeader.substring(7));
+  if (!decoded) return null;
+
+  // The token proves identity, but current account state is authoritative for
+  // authorization. This makes deletions and admin demotions effective
+  // immediately instead of waiting for a seven-day access token to expire.
+  const user = getUserById(decoded.userId);
+  if (!user) return null;
+
+  return {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    is_admin: !!user.is_admin,
+  };
+}
+
+function authenticateApiKey(apiKey) {
+  if (!apiKey) return null;
+  const user = validateApiKey(apiKey);
+  if (!user) return null;
+  return {
+    id: user.user_id,
+    username: user.username,
+    email: user.email,
+    is_admin: !!user.is_admin,
+  };
+}
+
+/** Authentication middleware - supports access JWTs and API keys. */
 export function authenticate(req, res, next) {
-  // Check for JWT token in Authorization header
-  const authHeader = req.headers.authorization;
-
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.substring(7);
-    const decoded = verifyAccessToken(token);
-
-    if (decoded) {
-      req.user = {
-        id: decoded.userId,
-        username: decoded.username,
-        is_admin: decoded.isAdmin || false,
-      };
-      return next();
-    }
+  const jwtUser = authenticateJwt(req.headers.authorization);
+  if (jwtUser) {
+    req.user = jwtUser;
+    return next();
   }
 
-  // Check for API key in X-API-Key header
-  const apiKey = req.headers['x-api-key'];
-
-  if (apiKey) {
-    const user = validateApiKey(apiKey);
-
-    if (user) {
-      req.user = {
-        id: user.user_id,
-        username: user.username,
-        email: user.email,
-        is_admin: user.is_admin || false,
-      };
-      return next();
-    }
+  const apiUser = authenticateApiKey(req.headers['x-api-key']);
+  if (apiUser) {
+    req.user = apiUser;
+    return next();
   }
 
-  // No valid authentication found
   return res.status(401).json({ error: 'Authentication required' });
 }
 
-/**
- * Optional authentication - doesn't fail if no auth provided
- */
+/** Optional authentication - doesn't fail if no auth provided. */
 export function optionalAuthenticate(req, res, next) {
-  const authHeader = req.headers.authorization;
-
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.substring(7);
-    const decoded = verifyAccessToken(token);
-
-    if (decoded) {
-      req.user = {
-        id: decoded.userId,
-        username: decoded.username,
-        is_admin: decoded.isAdmin || false,
-      };
-    }
-  } else {
-    const apiKey = req.headers['x-api-key'];
-
-    if (apiKey) {
-      const user = validateApiKey(apiKey);
-
-      if (user) {
-        req.user = {
-          id: user.user_id,
-          username: user.username,
-          email: user.email,
-          is_admin: user.is_admin || false,
-        };
-      }
-    }
+  const jwtUser = authenticateJwt(req.headers.authorization);
+  if (jwtUser) {
+    req.user = jwtUser;
+    return next();
   }
 
+  const apiUser = authenticateApiKey(req.headers['x-api-key']);
+  if (apiUser) req.user = apiUser;
   next();
 }
