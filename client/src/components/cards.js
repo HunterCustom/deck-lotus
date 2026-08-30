@@ -1,5 +1,5 @@
 import api from '../services/api.js';
-import { showLoading, hideLoading, formatMana, formatOracleText, debounce, showModal, hideModal, showToast } from '../utils/ui.js';
+import { showLoading, hideLoading, formatMana, formatOracleText, debounce, showModal, hideModal, showToast, escapeHtml } from '../utils/ui.js';
 
 let currentPage = 1;
 let currentFilters = {
@@ -825,8 +825,8 @@ export async function showCardDetail(cardId) {
                   ${ownership.deckUsage.map(deck => `
                     <div class="deck-usage-item" data-deck-id="${deck.id}" style="padding: 0.75rem; background: var(--bg-secondary); border-radius: 8px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: all 0.2s; border: 1px solid var(--border-color);" onmouseenter="this.style.background='var(--bg-tertiary)'; this.style.borderColor='var(--accent-color)';" onmouseleave="this.style.background='var(--bg-secondary)'; this.style.borderColor='var(--border-color)';">
                       <div style="flex: 1;">
-                        <div style="font-weight: 500;">${deck.name}</div>
-                        ${deck.format ? `<div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem;">${deck.format}</div>` : ''}
+                        <div style="font-weight: 500;">${escapeHtml(deck.name)}</div>
+                        ${deck.format ? `<div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem;">${escapeHtml(deck.format)}</div>` : ''}
                       </div>
                       <div style="font-weight: 600; color: var(--accent-color);">×${deck.total_quantity}</div>
                     </div>
@@ -1605,7 +1605,7 @@ async function loadDecksForDrag() {
 
     deckZonesContainer.innerHTML = decks.map(deck => `
       <div class="deck-drag-container">
-        <div class="deck-drag-name">${deck.name}</div>
+        <div class="deck-drag-name">${escapeHtml(deck.name)}</div>
         <div class="deck-drag-zones-split">
           <div class="deck-drag-zone" data-deck-id="${deck.id}" data-is-sideboard="true">
             <div class="deck-drag-zone-label">Sideboard</div>
