@@ -119,7 +119,6 @@ async function start() {
             );
             console.log(`✓ Admin user created: ${process.env.ADMIN_USERNAME}`);
             console.log(`   Email: ${process.env.ADMIN_EMAIL}`);
-            console.log(`   Password: ${process.env.ADMIN_PASSWORD}`);
             console.log('\n⚠️  IMPORTANT: Change the admin password immediately after first login!');
           }
         } else {
