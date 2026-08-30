@@ -8,6 +8,43 @@ export function escapeHtml(value) {
   })[char]);
 }
 
+/**
+ * Sanitize application-generated rich HTML before putting it in a modal.
+ * This keeps the existing formatted modal API while removing script-capable
+ * elements, inline event handlers, and dangerous URL schemes.
+ */
+function sanitizeRichHtml(html) {
+  const template = document.createElement('template');
+  template.innerHTML = String(html ?? '');
+
+  const blockedTags = new Set([
+    'SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'SVG', 'MATH', 'STYLE', 'LINK', 'META', 'BASE'
+  ]);
+  const urlAttributes = new Set(['href', 'src', 'xlink:href', 'formaction']);
+
+  const nodes = template.content.querySelectorAll('*');
+  for (const node of nodes) {
+    if (blockedTags.has(node.tagName)) {
+      node.remove();
+      continue;
+    }
+
+    for (const attr of [...node.attributes]) {
+      const name = attr.name.toLowerCase();
+      const value = attr.value.trim();
+      if (name.startsWith('on') || name === 'srcdoc') {
+        node.removeAttribute(attr.name);
+        continue;
+      }
+      if (urlAttributes.has(name) && /^(?:javascript|vbscript|data):/i.test(value)) {
+        node.removeAttribute(attr.name);
+      }
+    }
+  }
+
+  return template.content;
+}
+
 export function showLoading() {
   document.getElementById('loading').classList.remove('hidden');
 }
@@ -29,17 +66,20 @@ export function showError(message, container = 'auth-error') {
 }
 
 /**
- * Show a modal whose body is intentionally supplied as trusted application HTML.
- * The title is plain text and is always escaped.
+ * Show a modal with a plain-text title and sanitized rich application content.
  */
 export function showModal(title, content) {
   const modal = document.getElementById('modal');
   const modalBody = document.getElementById('modal-body');
 
-  modalBody.innerHTML = `
-    <h2>${escapeHtml(title)}</h2>
-    <div>${content}</div>
-  `;
+  modalBody.replaceChildren();
+  const heading = document.createElement('h2');
+  heading.textContent = String(title ?? '');
+  modalBody.appendChild(heading);
+
+  const body = document.createElement('div');
+  body.appendChild(sanitizeRichHtml(content));
+  modalBody.appendChild(body);
 
   modal.classList.remove('hidden');
 }
@@ -48,10 +88,6 @@ export function hideModal() {
   document.getElementById('modal').classList.add('hidden');
 }
 
-/**
- * Generic show/hide for any modal or drawer element by id.
- * Centralizes what components used to do ad-hoc with classList.
- */
 export function openModal(id) {
   const el = document.getElementById(id);
   if (el) el.classList.remove('hidden');
@@ -67,10 +103,6 @@ export function closeModal(id) {
 export const openDrawer = openModal;
 export const closeDrawer = closeModal;
 
-/* ------------------------------------------------------------------
-   Global overlay behavior: Esc + backdrop click + close buttons.
-   Applies to every .modal and .drawer without per-component wiring.
------------------------------------------------------------------- */
 function closeTopLayer() {
   const layers = document.querySelectorAll(
     '.modal:not(.hidden):not([data-persist]), .drawer:not(.hidden):not([data-persist])'
@@ -173,9 +205,6 @@ export function showToast(message, type = 'success', duration = 3000) {
   if (duration) setTimeout(dismiss, duration);
 }
 
-/**
- * Styled confirmation dialog. All supplied labels/messages are plain text.
- */
 export function confirmDialog({
   title = 'Are you sure?',
   message = '',
