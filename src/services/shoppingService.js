@@ -1,23 +1,24 @@
 import db from '../db/connection.js';
+import { getMarketPriceSql } from './pricingService.js';
 
 /**
- * Get shopping list for selected decks
- * Returns cards needed (not owned) grouped by set
+ * Build a shopping list for the exact printings used by the selected decks.
+ * Required quantities are summed across those decks, then reduced by the
+ * quantity of that same printing the user owns.
  */
 export function getShoppingList(userId, deckIds) {
-  if (!deckIds || deckIds.length === 0) {
-    return {
-      sets: [],
-      totalCards: 0,
-      totalDecks: 0,
-    };
+  const ids = (deckIds || [])
+    .map(Number)
+    .filter(Number.isInteger);
+
+  if (!ids.length) {
+    return { sets: [], totalCards: 0, totalUniqueCards: 0, totalDecks: 0, totalPrice: 0 };
   }
 
-  // Get all unique cards needed from selected decks that user doesn't own
-  const placeholders = deckIds.map(() => '?').join(',');
-
-  const query = `
-    SELECT DISTINCT
+  const placeholders = ids.map(() => '?').join(',');
+  const priceSql = getMarketPriceSql('p');
+  const rows = db.all(`
+    SELECT
       c.id as card_id,
       c.name,
       c.mana_cost,
@@ -35,91 +36,97 @@ export function getShoppingList(userId, deckIds) {
       d.name as deck_name,
       dc.quantity,
       COALESCE(dc.board_type, CASE WHEN dc.is_sideboard = 1 THEN 'sideboard' ELSE 'mainboard' END) as board_type,
-      (SELECT price FROM prices WHERE printing_uuid = p.uuid AND provider = 'tcgplayer' AND price_type = 'normal' LIMIT 1) as price
+      COALESCE(op.quantity, 0) as owned_quantity,
+      ${priceSql} as price
     FROM deck_cards dc
-    JOIN decks d ON dc.deck_id = d.id
-    JOIN printings p ON dc.printing_id = p.id
-    JOIN cards c ON p.card_id = c.id
-    LEFT JOIN sets s ON p.set_code = s.code
-    LEFT JOIN owned_cards oc ON oc.user_id = ? AND oc.card_id = c.id
+    JOIN decks d ON d.id = dc.deck_id
+    JOIN printings p ON p.id = dc.printing_id
+    JOIN cards c ON c.id = p.card_id
+    LEFT JOIN sets s ON s.code = p.set_code
+    LEFT JOIN owned_printings op ON op.user_id = ? AND op.printing_id = p.id
     WHERE d.user_id = ?
       AND d.id IN (${placeholders})
-      AND oc.id IS NULL
     ORDER BY s.name, p.collector_number, c.name
-  `;
+  `, [userId, userId, ...ids]);
 
-  const params = [userId, userId, ...deckIds];
-  const cards = db.all(query, params);
-
-  // Group cards by set
-  const setMap = new Map();
-
-  for (const card of cards) {
-    const setCode = card.set_code;
-
-    if (!setMap.has(setCode)) {
-      setMap.set(setCode, {
-        setCode,
-        setName: card.set_name || setCode.toUpperCase(),
-        releaseDate: card.release_date,
-        cards: [],
-      });
+  // Aggregate required copies by exact printing while retaining per-deck usage.
+  const printingMap = new Map();
+  for (const row of rows) {
+    let item = printingMap.get(row.printing_id);
+    if (!item) {
+      item = {
+        ...row,
+        requiredQuantity: 0,
+        ownedQuantity: Number(row.owned_quantity) || 0,
+        decks: [],
+      };
+      printingMap.set(row.printing_id, item);
     }
 
-    const set = setMap.get(setCode);
-
-    // Check if this card already exists in this set
-    let existingCard = set.cards.find(c => c.cardId === card.card_id && c.printingId === card.printing_id);
-
-    if (existingCard) {
-      // Add this deck to the card's deck list (or update if same deck but different board)
-      const existingDeckEntry = existingCard.decks.find(
-        d => d.deckId === card.deck_id && d.boardType === card.board_type
-      );
-
-      if (!existingDeckEntry) {
-        existingCard.decks.push({
-          deckId: card.deck_id,
-          deckName: card.deck_name,
-          quantity: card.quantity,
-          boardType: card.board_type,
-        });
-      }
+    item.requiredQuantity += Number(row.quantity) || 0;
+    const existingDeck = item.decks.find(d => d.deckId === row.deck_id && d.boardType === row.board_type);
+    if (existingDeck) {
+      existingDeck.quantity += Number(row.quantity) || 0;
     } else {
-      // Add new card
-      set.cards.push({
-        cardId: card.card_id,
-        printingId: card.printing_id,
-        name: card.name,
-        manaCost: card.mana_cost,
-        typeLine: card.type_line,
-        colorIdentity: card.color_identity,
-        setCode: card.set_code,
-        collectorNumber: card.collector_number,
-        rarity: card.rarity,
-        imageUrl: card.image_url,
-        price: card.price,
-        decks: [{
-          deckId: card.deck_id,
-          deckName: card.deck_name,
-          quantity: card.quantity,
-          boardType: card.board_type,
-        }],
+      item.decks.push({
+        deckId: row.deck_id,
+        deckName: row.deck_name,
+        quantity: Number(row.quantity) || 0,
+        boardType: row.board_type,
       });
     }
   }
 
-  // Convert map to array and sort by set name
-  const sets = Array.from(setMap.values()).sort((a, b) =>
-    a.setName.localeCompare(b.setName)
-  );
+  const setMap = new Map();
+  let totalCards = 0;
+  let totalPrice = 0;
 
-  // Calculate total cards needed
-  const totalCards = sets.reduce((sum, set) => sum + set.cards.length, 0);
+  for (const item of printingMap.values()) {
+    const quantityNeeded = Math.max(item.requiredQuantity - item.ownedQuantity, 0);
+    if (!quantityNeeded) continue;
+
+    const setCode = item.set_code || 'unknown';
+    if (!setMap.has(setCode)) {
+      setMap.set(setCode, {
+        setCode,
+        setName: item.set_name || (item.set_code ? item.set_code.toUpperCase() : 'Unknown Set'),
+        releaseDate: item.release_date,
+        cards: [],
+      });
+    }
+
+    const unitPrice = Number(item.price) || 0;
+    setMap.get(setCode).cards.push({
+      cardId: item.card_id,
+      printingId: item.printing_id,
+      name: item.name,
+      manaCost: item.mana_cost,
+      typeLine: item.type_line,
+      colorIdentity: item.color_identity,
+      setCode: item.set_code,
+      collectorNumber: item.collector_number,
+      rarity: item.rarity,
+      imageUrl: item.image_url,
+      price: unitPrice,
+      quantity: quantityNeeded,
+      quantityNeeded,
+      requiredQuantity: item.requiredQuantity,
+      ownedQuantity: item.ownedQuantity,
+      decks: item.decks,
+    });
+
+    totalCards += quantityNeeded;
+    totalPrice += unitPrice * quantityNeeded;
+  }
+
+  const sets = Array.from(setMap.values()).sort((a, b) => a.setName.localeCompare(b.setName));
+  const totalUniqueCards = sets.reduce((sum, set) => sum + set.cards.length, 0);
 
   return {
     sets,
     totalCards,
-    totalDecks: deckIds.length,
+    totalUniqueCards,
+    totalDecks: ids.length,
+    totalPrice,
   };
 }
