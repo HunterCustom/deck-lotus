@@ -244,8 +244,8 @@ router.get('/:id/ownership-usage', authenticate, (req, res, next) => {
 });
 
 /**
- * POST /api/cards/printings/:printingId/quantity
- * Set owned quantity for a specific printing
+ * POST /api/cards/printings/:printingId/swap
+ * Atomically move owned copies to another printing
  */
 router.post('/printings/:printingId/swap', authenticate, (req, res, next) => {
   try {
