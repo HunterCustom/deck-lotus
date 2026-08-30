@@ -2,15 +2,15 @@ import cron from 'node-cron';
 import { getDb } from '../db/connection.js';
 import { getLowestPrice as manaPoolPrice, isConfigured as manaPoolConfigured } from './manaPoolService.js';
 import { getLowestPrice as tcgPlayerPrice, isConfigured as tcgConfigured } from './tcgplayerService.js';
-import { sendPriceAlert, isConfigured as ntfyConfigured } from './notificationService.js';
+import { sendPriceAlert } from './notificationService.js';
+
+const VALID_CONDITIONS = new Set(['nm', 'lp', 'mp', 'hp', 'dm', 'any']);
 
 async function getLowestPrice(cardName, condition, scryfallId = null) {
   if (manaPoolConfigured()) return manaPoolPrice(cardName, condition, scryfallId);
   if (tcgConfigured()) return tcgPlayerPrice(cardName, condition);
   throw new Error('No price source configured — set MANAPOOL_API_TOKEN or TCGPlayer credentials');
 }
-
-// ── Watch CRUD ────────────────────────────────────────────────────────────────
 
 export function getWatches(userId) {
   const db = getDb();
@@ -25,9 +25,10 @@ export function getWatches(userId) {
 
 export function createWatch(userId, { cardName, maxPrice, condition = 'nm', notes, expiresAt, cardId, scryfallId, imageUrl, setCode, setName }) {
   if (!cardName?.trim()) throw new Error('card_name is required');
+  if (!VALID_CONDITIONS.has(condition)) throw new Error('Invalid condition');
 
   const parsedMax = maxPrice != null && maxPrice !== '' ? parseFloat(maxPrice) : null;
-  if (parsedMax !== null && (isNaN(parsedMax) || parsedMax <= 0)) {
+  if (parsedMax !== null && (!Number.isFinite(parsedMax) || parsedMax <= 0)) {
     throw new Error('max_price must be a positive number');
   }
 
@@ -51,20 +52,22 @@ export function updateWatch(userId, watchId, updates) {
 
   if (updates.maxPrice !== undefined) {
     const v = updates.maxPrice != null && updates.maxPrice !== '' ? parseFloat(updates.maxPrice) : null;
+    if (v !== null && (!Number.isFinite(v) || v <= 0)) throw new Error('max_price must be a positive number');
     fields.push('max_price = ?');
     values.push(v);
   }
   if (updates.condition !== undefined) {
+    if (!VALID_CONDITIONS.has(updates.condition)) throw new Error('Invalid condition');
     fields.push('condition = ?');
     values.push(updates.condition);
   }
   if (updates.notes !== undefined) {
     fields.push('notes = ?');
-    values.push(updates.notes);
+    values.push(updates.notes || null);
   }
   if (updates.expiresAt !== undefined) {
     fields.push('expires_at = ?');
-    values.push(updates.expiresAt);
+    values.push(updates.expiresAt || null);
   }
   if (updates.isActive !== undefined) {
     fields.push('is_active = ?');
@@ -72,10 +75,9 @@ export function updateWatch(userId, watchId, updates) {
   }
 
   if (!fields.length) return watch;
-
   values.push(watchId, userId);
   db.prepare(`UPDATE price_watches SET ${fields.join(', ')} WHERE id = ? AND user_id = ?`).run(...values);
-  return db.prepare('SELECT * FROM price_watches WHERE id = ?').get(watchId);
+  return db.prepare('SELECT * FROM price_watches WHERE id = ? AND user_id = ?').get(watchId, userId);
 }
 
 export function deleteWatch(userId, watchId) {
@@ -88,56 +90,39 @@ export function getWatchHistory(userId, watchId, limit = 50) {
   const db = getDb();
   const watch = db.prepare('SELECT id FROM price_watches WHERE id = ? AND user_id = ?').get(watchId, userId);
   if (!watch) throw new Error('Watch not found');
-
-  return db.prepare(`
-    SELECT * FROM price_check_log WHERE watch_id = ? ORDER BY checked_at DESC LIMIT ?
-  `).all(watchId, limit);
+  const safeLimit = Math.min(Math.max(parseInt(limit) || 50, 1), 500);
+  return db.prepare(`SELECT * FROM price_check_log WHERE watch_id = ? ORDER BY checked_at DESC LIMIT ?`).all(watchId, safeLimit);
 }
-
-// ── Scheduled price checking ──────────────────────────────────────────────────
 
 async function checkWatch(watch) {
   const db = getDb();
-
   try {
     const conditionArg = watch.condition === 'any' ? null : watch.condition;
     const result = await getLowestPrice(watch.card_name, conditionArg ?? 'nm', watch.scryfall_id || null);
     const foundPrice = result?.lowPrice ?? null;
-
     let notified = 0;
 
     if (foundPrice !== null) {
       if (watch.max_price !== null) {
-        // Fixed-threshold mode: alert when price is at or below target
         notified = foundPrice <= watch.max_price ? 1 : 0;
       } else {
-        // New-low mode: alert when price is strictly lower than any previous check
-        const prevLog = db.prepare(
-          `SELECT found_price FROM price_check_log
-           WHERE watch_id = ? AND found_price IS NOT NULL
-           ORDER BY checked_at DESC LIMIT 1`
-        ).get(watch.id);
-
-        if (prevLog && foundPrice < prevLog.found_price) {
-          notified = 1;
-        }
-        // No previous price yet → just record, no alert
+        const prevLog = db.prepare(`
+          SELECT found_price FROM price_check_log
+          WHERE watch_id = ? AND found_price IS NOT NULL
+          ORDER BY checked_at DESC LIMIT 1
+        `).get(watch.id);
+        if (prevLog && foundPrice < prevLog.found_price) notified = 1;
       }
     }
 
-    db.prepare(`
-      INSERT INTO price_check_log (watch_id, found_price, notified)
-      VALUES (?, ?, ?)
-    `).run(watch.id, foundPrice, notified);
-
-    db.prepare(`
-      UPDATE price_watches SET last_checked = datetime('now'), last_price = ? WHERE id = ?
-    `).run(foundPrice, watch.id);
+    db.prepare(`INSERT INTO price_check_log (watch_id, found_price, notified) VALUES (?, ?, ?)`)
+      .run(watch.id, foundPrice, notified);
+    db.prepare(`UPDATE price_watches SET last_checked = datetime('now'), last_price = ? WHERE id = ?`)
+      .run(foundPrice, watch.id);
 
     if (notified) {
       const lastNotified = watch.last_notified ? new Date(watch.last_notified) : null;
       const hoursSinceLast = lastNotified ? (Date.now() - lastNotified.getTime()) / 3_600_000 : Infinity;
-
       if (hoursSinceLast > 24) {
         await sendPriceAlert({
           cardName: watch.card_name,
@@ -145,7 +130,6 @@ async function checkWatch(watch) {
           threshold: watch.max_price,
           condition: watch.condition,
         });
-
         db.prepare(`UPDATE price_watches SET last_notified = datetime('now') WHERE id = ?`).run(watch.id);
         console.log(`  ✓ Alert sent: ${watch.card_name} @ $${foundPrice}`);
       }
@@ -158,39 +142,34 @@ async function checkWatch(watch) {
   }
 }
 
-export async function runPriceChecks() {
+/**
+ * Run price checks. Scheduled server jobs pass no userId and check everyone;
+ * manual API requests pass the authenticated userId and can only check that user.
+ */
+export async function runPriceChecks(userId = null) {
   const db = getDb();
-
+  const userClause = userId === null ? '' : 'AND user_id = ?';
   const watches = db.prepare(`
     SELECT * FROM price_watches
     WHERE is_active = 1
       AND (expires_at IS NULL OR expires_at > datetime('now'))
+      ${userClause}
     ORDER BY last_checked ASC NULLS FIRST
-  `).all();
+  `).all(...(userId === null ? [] : [userId]));
 
-  if (!watches.length) {
-    console.log('Price monitor: no active watches');
-    return [];
-  }
-
-  console.log(`\n💰 Checking prices for ${watches.length} watch(es)...`);
+  if (!watches.length) return [];
 
   const results = [];
   for (const watch of watches) {
-    const r = await checkWatch(watch);
-    results.push(r);
-    // Be polite to the API — 1.5s between requests
+    results.push(await checkWatch(watch));
     await new Promise(resolve => setTimeout(resolve, 1500));
   }
 
-  // Expire watches whose deadline has passed
-  db.prepare(`
-    UPDATE price_watches SET is_active = 0
-    WHERE is_active = 1 AND expires_at IS NOT NULL AND expires_at <= datetime('now')
-  `).run();
+  const expireSql = userId === null
+    ? `UPDATE price_watches SET is_active = 0 WHERE is_active = 1 AND expires_at IS NOT NULL AND expires_at <= datetime('now')`
+    : `UPDATE price_watches SET is_active = 0 WHERE user_id = ? AND is_active = 1 AND expires_at IS NOT NULL AND expires_at <= datetime('now')`;
+  db.prepare(expireSql).run(...(userId === null ? [] : [userId]));
 
-  const hits = results.filter(r => r.notified).length;
-  console.log(`✓ Price checks done — ${hits} alert(s) sent`);
   return results;
 }
 
@@ -204,7 +183,10 @@ export function getPriceCheckSchedule() {
 export function setPriceCheckSchedule(expression) {
   if (!cron.validate(expression)) throw new Error(`Invalid cron expression: ${expression}`);
   const isReschedule = !!activeScheduleJob;
-  if (activeScheduleJob) { activeScheduleJob.stop(); activeScheduleJob = null; }
+  if (activeScheduleJob) {
+    activeScheduleJob.stop();
+    activeScheduleJob = null;
+  }
   activeScheduleExpression = expression;
   activeScheduleJob = cron.schedule(expression, async () => {
     console.log('\n⏰ Running scheduled price checks...');
