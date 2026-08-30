@@ -1,5 +1,5 @@
 import api from '../services/api.js';
-import { showLoading, hideLoading, formatDate, showError, showToast, confirmDialog } from '../utils/ui.js';
+import { showLoading, hideLoading, formatDate, showError, showToast, confirmDialog, escapeHtml } from '../utils/ui.js';
 
 let decks = [];
 
@@ -115,8 +115,8 @@ function renderDecks() {
       <div class="deck-card" data-deck-id="${deck.id}" style="${backgroundStyle}">
         <div class="deck-card-header">
           <div>
-            <h3>${deck.name}</h3>
-            ${deck.format ? `<span class="deck-format">${deck.format}</span>` : ''}
+            <h3>${escapeHtml(deck.name)}</h3>
+            ${deck.format ? `<span class="deck-format">${escapeHtml(deck.format)}</span>` : ''}
           </div>
         </div>
         <div class="deck-card-stats">
