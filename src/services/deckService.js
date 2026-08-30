@@ -184,7 +184,6 @@ export function deleteDeck(deckId, userId) {
  * Add card to deck
  */
 export function addCardToDeck(deckId, userId, printingId, quantity = 1, isSideboard = false, isCommander = false, boardType = null) {
-  // Verify deck ownership
   const deck = db.get(
     `SELECT id FROM decks WHERE id = ? AND user_id = ?`,
     [deckId, userId]
@@ -194,35 +193,39 @@ export function addCardToDeck(deckId, userId, printingId, quantity = 1, isSidebo
     throw new Error('Deck not found or access denied');
   }
 
-  // Determine board type
-  const finalBoardType = boardType || (isSideboard ? 'sideboard' : 'mainboard');
+  if (!Number.isInteger(Number(quantity)) || Number(quantity) <= 0) {
+    throw new Error('Quantity must be a positive integer');
+  }
 
-  // Check if card already exists in deck
+  const finalBoardType = boardType || (isSideboard ? 'sideboard' : 'mainboard');
+  if (!['mainboard', 'sideboard', 'maybeboard'].includes(finalBoardType)) {
+    throw new Error('Invalid board type');
+  }
+  const finalIsSideboard = finalBoardType === 'sideboard' ? 1 : 0;
+
   const existing = db.get(
-    `SELECT id, quantity FROM deck_cards
+    `SELECT id FROM deck_cards
      WHERE deck_id = ? AND printing_id = ? AND board_type = ?`,
     [deckId, printingId, finalBoardType]
   );
 
   if (existing) {
-    // Update quantity
     db.run(
-      `UPDATE deck_cards SET quantity = quantity + ?, is_commander = ?
+      `UPDATE deck_cards
+       SET quantity = quantity + ?, is_commander = CASE WHEN ? = 1 THEN 1 ELSE is_commander END,
+           is_sideboard = ?
        WHERE id = ?`,
-      [quantity, isCommander ? 1 : 0, existing.id]
+      [Number(quantity), isCommander ? 1 : 0, finalIsSideboard, existing.id]
     );
   } else {
-    // Insert new
     db.run(
       `INSERT INTO deck_cards (deck_id, printing_id, quantity, is_sideboard, is_commander, board_type)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [deckId, printingId, quantity, isSideboard ? 1 : 0, isCommander ? 1 : 0, finalBoardType]
+      [deckId, printingId, Number(quantity), finalIsSideboard, isCommander ? 1 : 0, finalBoardType]
     );
   }
 
-  // Update deck timestamp
   db.run(`UPDATE decks SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [deckId]);
-
   return getDeckById(deckId, userId);
 }
 
@@ -230,7 +233,6 @@ export function addCardToDeck(deckId, userId, printingId, quantity = 1, isSidebo
  * Update card quantity in deck
  */
 export function updateDeckCard(deckId, userId, deckCardId, updates) {
-  // Verify deck ownership
   const deck = db.get(
     `SELECT id FROM decks WHERE id = ? AND user_id = ?`,
     [deckId, userId]
@@ -240,56 +242,84 @@ export function updateDeckCard(deckId, userId, deckCardId, updates) {
     throw new Error('Deck not found or access denied');
   }
 
-  const { quantity, isSideboard, isCommander, printingId, boardType } = updates;
-
-  const fields = [];
-  const params = [];
-
-  if (quantity !== undefined) {
-    if (quantity <= 0) {
-      // Remove card if quantity is 0 or less
-      return removeCardFromDeck(deckId, userId, deckCardId);
-    }
-    fields.push('quantity = ?');
-    params.push(quantity);
-  }
-  if (boardType !== undefined) {
-    fields.push('board_type = ?');
-    params.push(boardType);
-    // Update is_sideboard for backward compatibility
-    fields.push('is_sideboard = ?');
-    params.push(boardType === 'sideboard' ? 1 : 0);
-  } else if (isSideboard !== undefined) {
-    // Backward compatibility
-    fields.push('is_sideboard = ?');
-    params.push(isSideboard ? 1 : 0);
-    fields.push('board_type = ?');
-    params.push(isSideboard ? 'sideboard' : 'mainboard');
-  }
-  if (isCommander !== undefined) {
-    fields.push('is_commander = ?');
-    params.push(isCommander ? 1 : 0);
-  }
-  if (printingId !== undefined) {
-    fields.push('printing_id = ?');
-    params.push(printingId);
-  }
-
-  if (fields.length === 0) {
-    return getDeckById(deckId, userId);
-  }
-
-  params.push(deckCardId, deckId);
-
-  db.run(
-    `UPDATE deck_cards SET ${fields.join(', ')}
+  const current = db.get(
+    `SELECT id, printing_id, quantity, is_sideboard, is_commander,
+            COALESCE(board_type, CASE WHEN is_sideboard = 1 THEN 'sideboard' ELSE 'mainboard' END) AS board_type
+     FROM deck_cards
      WHERE id = ? AND deck_id = ?`,
-    params
+    [deckCardId, deckId]
   );
 
-  // Update deck timestamp
-  db.run(`UPDATE decks SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [deckId]);
+  if (!current) {
+    throw new Error('Deck card not found');
+  }
 
+  const { quantity, isSideboard, isCommander, printingId, boardType } = updates;
+
+  if (quantity !== undefined && Number(quantity) <= 0) {
+    return removeCardFromDeck(deckId, userId, deckCardId);
+  }
+
+  const nextQuantity = quantity !== undefined ? Number(quantity) : current.quantity;
+  if (!Number.isInteger(nextQuantity) || nextQuantity <= 0) {
+    throw new Error('Quantity must be a positive integer');
+  }
+
+  let nextBoardType = current.board_type;
+  if (boardType !== undefined) {
+    nextBoardType = boardType;
+  } else if (isSideboard !== undefined) {
+    nextBoardType = isSideboard ? 'sideboard' : 'mainboard';
+  }
+
+  if (!['mainboard', 'sideboard', 'maybeboard'].includes(nextBoardType)) {
+    throw new Error('Invalid board type');
+  }
+
+  const nextPrintingId = printingId !== undefined ? Number(printingId) : current.printing_id;
+  const nextIsCommander = isCommander !== undefined ? (isCommander ? 1 : 0) : current.is_commander;
+  const nextIsSideboard = nextBoardType === 'sideboard' ? 1 : 0;
+
+  const existingTarget = db.get(
+    `SELECT id, quantity, is_commander
+     FROM deck_cards
+     WHERE deck_id = ? AND printing_id = ? AND board_type = ? AND id != ?`,
+    [deckId, nextPrintingId, nextBoardType, deckCardId]
+  );
+
+  if (existingTarget) {
+    db.transaction(() => {
+      db.run(
+        `UPDATE deck_cards
+         SET quantity = ?, is_commander = ?, is_sideboard = ?
+         WHERE id = ?`,
+        [
+          existingTarget.quantity + nextQuantity,
+          existingTarget.is_commander || nextIsCommander ? 1 : 0,
+          nextIsSideboard,
+          existingTarget.id
+        ]
+      );
+      db.run(`DELETE FROM deck_cards WHERE id = ? AND deck_id = ?`, [deckCardId, deckId]);
+    });
+  } else {
+    db.run(
+      `UPDATE deck_cards
+       SET printing_id = ?, quantity = ?, is_sideboard = ?, is_commander = ?, board_type = ?
+       WHERE id = ? AND deck_id = ?`,
+      [
+        nextPrintingId,
+        nextQuantity,
+        nextIsSideboard,
+        nextIsCommander,
+        nextBoardType,
+        deckCardId,
+        deckId
+      ]
+    );
+  }
+
+  db.run(`UPDATE decks SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [deckId]);
   return getDeckById(deckId, userId);
 }
 
@@ -541,12 +571,18 @@ export function importSharedDeck(shareToken, userId) {
     sharedDeck.description
   );
 
-  // Copy all cards to the new deck
+  // Copy all cards to the new deck, preserving the logical board.
   for (const card of sharedDeck.cards) {
+    const boardType = card.board_type || (card.is_sideboard ? 'sideboard' : 'mainboard');
+    const isSideboard = boardType === 'sideboard' ? 1 : 0;
     db.run(
-      `INSERT INTO deck_cards (deck_id, printing_id, quantity, is_sideboard, is_commander)
-       VALUES (?, ?, ?, ?, ?)`,
-      [newDeck.id, card.printing_id, card.quantity, card.is_sideboard, card.is_commander]
+      `INSERT INTO deck_cards (deck_id, printing_id, quantity, is_sideboard, is_commander, board_type)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(deck_id, printing_id, board_type) DO UPDATE SET
+         quantity = deck_cards.quantity + excluded.quantity,
+         is_commander = CASE WHEN excluded.is_commander = 1 THEN 1 ELSE deck_cards.is_commander END,
+         is_sideboard = excluded.is_sideboard`,
+      [newDeck.id, card.printing_id, card.quantity, isSideboard, card.is_commander ? 1 : 0, boardType]
     );
   }
 
