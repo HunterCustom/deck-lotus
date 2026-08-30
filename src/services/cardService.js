@@ -649,7 +649,7 @@ export function getCardOwnedPrintings(userId, cardId) {
  * Add or update owned printing quantity
  * Also syncs with owned_cards table
  */
-export function setOwnedPrintingQuantity(userId, printingId, quantity, replacementPrintingId = null) {
+export function setOwnedPrintingQuantity(userId, printingId, quantity) {
   // Get the card_id for this printing
   const printing = db.get(
     `SELECT card_id FROM printings WHERE id = ?`,
@@ -663,65 +663,6 @@ export function setOwnedPrintingQuantity(userId, printingId, quantity, replaceme
   const cardId = printing.card_id;
 
   if (quantity <= 0) {
-    if (replacementPrintingId) {
-      const replacement = db.get(
-        `SELECT card_id FROM printings WHERE id = ?`,
-        [replacementPrintingId]
-      );
-
-      if (!replacement || replacement.card_id !== cardId) {
-        throw new Error('Replacement printing must be for the same card');
-      }
-
-      const affectedDeckRows = db.all(
-        `SELECT dc.id, dc.deck_id, dc.quantity, dc.is_sideboard, dc.is_commander,
-                COALESCE(dc.board_type, CASE WHEN dc.is_sideboard = 1 THEN 'sideboard' ELSE 'mainboard' END) as board_type
-         FROM deck_cards dc
-         JOIN decks d ON d.id = dc.deck_id
-         WHERE dc.printing_id = ? AND d.user_id = ?`,
-        [printingId, userId]
-      );
-
-      for (const deckRow of affectedDeckRows) {
-        // The database uniqueness constraint is based on deck/is_sideboard/printing.
-        // If the replacement already exists in the same logical board, merge the rows.
-        // If it exists in a different logical board that shares the legacy is_sideboard
-        // value (for example mainboard vs maybeboard), leave this row unchanged instead
-        // of collapsing cards across boards.
-        const existingDeckRow = db.get(
-          `SELECT id, quantity, is_commander,
-                  COALESCE(board_type, CASE WHEN is_sideboard = 1 THEN 'sideboard' ELSE 'mainboard' END) as board_type
-           FROM deck_cards
-           WHERE deck_id = ? AND printing_id = ? AND is_sideboard = ?`,
-          [deckRow.deck_id, replacementPrintingId, deckRow.is_sideboard]
-        );
-
-        if (existingDeckRow) {
-          if (existingDeckRow.board_type !== deckRow.board_type) {
-            continue;
-          }
-
-          db.run(
-            `UPDATE deck_cards
-             SET quantity = ?, is_commander = ?
-             WHERE id = ?`,
-            [
-              existingDeckRow.quantity + deckRow.quantity,
-              existingDeckRow.is_commander || deckRow.is_commander ? 1 : 0,
-              existingDeckRow.id
-            ]
-          );
-
-          db.run(`DELETE FROM deck_cards WHERE id = ?`, [deckRow.id]);
-        } else {
-          db.run(
-            `UPDATE deck_cards SET printing_id = ? WHERE id = ?`,
-            [replacementPrintingId, deckRow.id]
-          );
-        }
-      }
-    }
-
     // Remove if quantity is 0 or less
     db.run(
       `DELETE FROM owned_printings WHERE user_id = ? AND printing_id = ?`,
@@ -776,6 +717,123 @@ export function setOwnedPrintingQuantity(userId, printingId, quantity, replaceme
   );
 
   return { success: true, quantity };
+}
+
+/**
+ * Atomically move all owned copies from one printing to another.
+ * Deck rows that explicitly use the old owned printing move with it.
+ */
+export function swapOwnedPrinting(userId, fromPrintingId, toPrintingId) {
+  if (fromPrintingId === toPrintingId) {
+    throw new Error('Replacement printing must be different');
+  }
+
+  const source = db.get(
+    `SELECT op.id as owned_printing_id, op.quantity, p.card_id
+     FROM owned_printings op
+     JOIN printings p ON op.printing_id = p.id
+     WHERE op.user_id = ? AND op.printing_id = ?`,
+    [userId, fromPrintingId]
+  );
+
+  if (!source) {
+    throw new Error('Owned printing not found');
+  }
+
+  const replacement = db.get(
+    `SELECT card_id FROM printings WHERE id = ?`,
+    [toPrintingId]
+  );
+
+  if (!replacement || replacement.card_id !== source.card_id) {
+    throw new Error('Replacement printing must be for the same card');
+  }
+
+  return db.transaction(() => {
+    const affectedDeckRows = db.all(
+      `SELECT dc.id, dc.deck_id, dc.quantity, dc.is_sideboard, dc.is_commander,
+              COALESCE(dc.board_type, CASE WHEN dc.is_sideboard = 1 THEN 'sideboard' ELSE 'mainboard' END) as board_type
+       FROM deck_cards dc
+       JOIN decks d ON d.id = dc.deck_id
+       WHERE dc.printing_id = ? AND d.user_id = ?`,
+      [fromPrintingId, userId]
+    );
+
+    for (const deckRow of affectedDeckRows) {
+      const existingDeckRow = db.get(
+        `SELECT id, quantity, is_commander,
+                COALESCE(board_type, CASE WHEN is_sideboard = 1 THEN 'sideboard' ELSE 'mainboard' END) as board_type
+         FROM deck_cards
+         WHERE deck_id = ? AND printing_id = ? AND is_sideboard = ?`,
+        [deckRow.deck_id, toPrintingId, deckRow.is_sideboard]
+      );
+
+      if (existingDeckRow) {
+        // Legacy uniqueness is based on is_sideboard. Do not merge two logical
+        // boards (for example mainboard and maybeboard) that share that flag.
+        if (existingDeckRow.board_type !== deckRow.board_type) {
+          continue;
+        }
+
+        db.run(
+          `UPDATE deck_cards
+           SET quantity = ?, is_commander = ?
+           WHERE id = ?`,
+          [
+            existingDeckRow.quantity + deckRow.quantity,
+            existingDeckRow.is_commander || deckRow.is_commander ? 1 : 0,
+            existingDeckRow.id
+          ]
+        );
+        db.run(`DELETE FROM deck_cards WHERE id = ?`, [deckRow.id]);
+      } else {
+        db.run(
+          `UPDATE deck_cards SET printing_id = ? WHERE id = ?`,
+          [toPrintingId, deckRow.id]
+        );
+      }
+    }
+
+    const existingReplacement = db.get(
+      `SELECT id, quantity
+       FROM owned_printings
+       WHERE user_id = ? AND printing_id = ?`,
+      [userId, toPrintingId]
+    );
+
+    if (existingReplacement) {
+      db.run(
+        `UPDATE owned_printings
+         SET quantity = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [existingReplacement.quantity + source.quantity, existingReplacement.id]
+      );
+    } else {
+      db.run(
+        `INSERT INTO owned_printings (user_id, printing_id, quantity)
+         VALUES (?, ?, ?)`,
+        [userId, toPrintingId, source.quantity]
+      );
+    }
+
+    db.run(
+      `DELETE FROM owned_printings WHERE id = ?`,
+      [source.owned_printing_id]
+    );
+
+    db.run(
+      `INSERT INTO owned_cards (user_id, card_id, quantity) VALUES (?, ?, 1)
+       ON CONFLICT(user_id, card_id) DO UPDATE SET quantity = 1`,
+      [userId, source.card_id]
+    );
+
+    return {
+      success: true,
+      fromPrintingId,
+      toPrintingId,
+      quantity: source.quantity
+    };
+  });
 }
 
 /**
