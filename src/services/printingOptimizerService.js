@@ -226,26 +226,52 @@ export function analyzeSpecificSet(deckId, userId, setCode) {
 export function applyPrintingOptimization(deckId, userId, changes) {
   const db = getDb();
 
-  // Verify deck ownership
   const deck = db.prepare('SELECT id FROM decks WHERE id = ? AND user_id = ?').get(deckId, userId);
   if (!deck) {
     throw new Error('Deck not found');
   }
 
-  // Apply changes in a transaction
   const applyChanges = db.transaction(() => {
-    const updateStmt = db.prepare(`
-      UPDATE deck_cards
-      SET printing_id = ?
-      WHERE id = ? AND deck_id = ?
-    `);
-
     let updated = 0;
+
     for (const change of changes) {
-      const result = updateStmt.run(change.newPrintingId, change.deckCardId, deckId);
-      if (result.changes > 0) {
-        updated++;
+      const current = db.prepare(`
+        SELECT id, quantity, is_commander,
+               COALESCE(board_type, CASE WHEN is_sideboard = 1 THEN 'sideboard' ELSE 'mainboard' END) AS board_type
+        FROM deck_cards
+        WHERE id = ? AND deck_id = ?
+      `).get(change.deckCardId, deckId);
+
+      if (!current) continue;
+
+      const replacement = db.prepare('SELECT id FROM printings WHERE id = ?').get(change.newPrintingId);
+      if (!replacement) {
+        throw new Error(`Printing ${change.newPrintingId} not found`);
       }
+
+      const existing = db.prepare(`
+        SELECT id, quantity, is_commander
+        FROM deck_cards
+        WHERE deck_id = ? AND printing_id = ? AND board_type = ? AND id != ?
+      `).get(deckId, change.newPrintingId, current.board_type, current.id);
+
+      if (existing) {
+        db.prepare(`
+          UPDATE deck_cards
+          SET quantity = ?, is_commander = ?
+          WHERE id = ?
+        `).run(
+          existing.quantity + current.quantity,
+          existing.is_commander || current.is_commander ? 1 : 0,
+          existing.id
+        );
+        db.prepare('DELETE FROM deck_cards WHERE id = ?').run(current.id);
+      } else {
+        db.prepare('UPDATE deck_cards SET printing_id = ? WHERE id = ? AND deck_id = ?')
+          .run(change.newPrintingId, current.id, deckId);
+      }
+
+      updated++;
     }
 
     return updated;
