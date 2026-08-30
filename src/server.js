@@ -21,6 +21,7 @@ import priceMonitoringRoutes from './routes/priceMonitoring.js';
 import manapoolRoutes from './routes/manapool.js';
 import { setupDailySync } from './services/syncService.js';
 import { setupPriceMonitoringSchedule } from './services/priceMonitoringService.js';
+import { setupScheduledBackups } from './services/backupService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -192,6 +193,7 @@ async function start() {
     // Setup daily sync schedule
     setupDailySync();
     setupPriceMonitoringSchedule();
+    setupScheduledBackups();
 
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`\n🚀 Deck Lotus server running on port ${PORT}`);
