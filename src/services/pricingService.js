@@ -1,8 +1,5 @@
 import db from '../db/connection.js';
 
-/**
- * Get prices for a printing by UUID
- */
 export function getPrintingPrices(uuid) {
   const prices = db.all(
     `SELECT provider, price_type, price, updated_at
@@ -12,23 +9,28 @@ export function getPrintingPrices(uuid) {
     [uuid]
   );
 
-  // Format as object for easier access
   const formatted = {};
   for (const p of prices) {
-    if (!formatted[p.provider]) {
-      formatted[p.provider] = {};
-    }
+    if (!formatted[p.provider]) formatted[p.provider] = {};
     formatted[p.provider][p.price_type] = p.price;
   }
-
   return formatted;
 }
 
 /**
- * Get deck total price
+ * Get deck total price. When userId is supplied, the deck must belong to that
+ * user; this prevents authenticated users from probing other users' deck IDs.
  */
-export function getDeckPrice(deckId) {
-  // Prefer tcgplayer normal prices (sourced from MTGJSON weekly sync)
+export function getDeckPrice(deckId, userId = null) {
+  if (userId !== null) {
+    const owned = db.get('SELECT id FROM decks WHERE id = ? AND user_id = ?', [deckId, userId]);
+    if (!owned) {
+      const error = new Error('Deck not found');
+      error.statusCode = 404;
+      throw error;
+    }
+  }
+
   const priceSubquery = `COALESCE(
     (SELECT price FROM prices WHERE printing_uuid = p.uuid AND provider = 'tcgplayer' AND price_type = 'normal' LIMIT 1),
     (SELECT price FROM prices WHERE printing_uuid = p.uuid AND price_type = 'normal' LIMIT 1),
@@ -43,7 +45,6 @@ export function getDeckPrice(deckId) {
     [deckId]
   );
 
-  // Get card-level pricing with card details
   const cardPrices = db.all(
     `SELECT
       dc.id as deck_card_id,
@@ -61,14 +62,9 @@ export function getDeckPrice(deckId) {
     [deckId]
   );
 
-  // Find most expensive card
   const mostExpensive = cardPrices.length > 0 ? cardPrices[0] : null;
-
-  // Create a map of deck_card_id to price for quick lookup
   const cardPriceMap = {};
-  cardPrices.forEach(card => {
-    cardPriceMap[card.deck_card_id] = card.unit_price;
-  });
+  for (const card of cardPrices) cardPriceMap[card.deck_card_id] = card.unit_price;
 
   return {
     total: result?.total_price || 0,
@@ -77,15 +73,12 @@ export function getDeckPrice(deckId) {
     mostExpensive: mostExpensive ? {
       name: mostExpensive.name,
       price: mostExpensive.unit_price,
-      imageUrl: mostExpensive.image_url
+      imageUrl: mostExpensive.image_url,
     } : null,
-    cardPrices: cardPriceMap
+    cardPrices: cardPriceMap,
   };
 }
 
-/**
- * Get prices for multiple printings
- */
 export function getBulkPrices(uuids) {
   if (!uuids || uuids.length === 0) return {};
 
@@ -97,17 +90,11 @@ export function getBulkPrices(uuids) {
     uuids
   );
 
-  // Group by UUID
   const grouped = {};
   for (const p of prices) {
-    if (!grouped[p.printing_uuid]) {
-      grouped[p.printing_uuid] = {};
-    }
-    if (!grouped[p.printing_uuid][p.provider]) {
-      grouped[p.printing_uuid][p.provider] = {};
-    }
+    if (!grouped[p.printing_uuid]) grouped[p.printing_uuid] = {};
+    if (!grouped[p.printing_uuid][p.provider]) grouped[p.printing_uuid][p.provider] = {};
     grouped[p.printing_uuid][p.provider][p.price_type] = p.price;
   }
-
   return grouped;
 }
