@@ -19,7 +19,7 @@ import shoppingRoutes from './routes/shopping.js';
 import inventoryRoutes from './routes/inventory.js';
 import priceMonitoringRoutes from './routes/priceMonitoring.js';
 import manapoolRoutes from './routes/manapool.js';
-import { setupDailySync } from './services/syncService.js';
+import { setupDailySync, getSyncStatus } from './services/syncService.js';
 import { setupPriceMonitoringSchedule } from './services/priceMonitoringService.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -52,9 +52,28 @@ if (process.env.NODE_ENV === 'production') {
   app.use(express.static(clientBuildPath));
 }
 
-// Health check endpoint
+// Health check endpoint remains available during maintenance.
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  const sync = getSyncStatus();
+  res.json({
+    status: sync.isRunning ? 'maintenance' : 'ok',
+    syncing: sync.isRunning,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// A full MTGJSON refresh temporarily removes/recreates card and printing rows.
+// Keep the process responsive, but do not let normal API requests observe that
+// transient database state. The admin sync-status endpoint stays available.
+app.use('/api', (req, res, next) => {
+  if (getSyncStatus().isRunning && req.path !== '/admin/sync-status') {
+    res.setHeader('Retry-After', '30');
+    return res.status(503).json({
+      error: 'Card database update in progress',
+      maintenance: true
+    });
+  }
+  next();
 });
 
 // API routes
@@ -166,16 +185,11 @@ async function start() {
       console.log('   This is a one-time process and may take several minutes.');
 
       try {
-        // Dynamic import of the import script
-        const { fileURLToPath } = await import('url');
-        const { dirname, join } = await import('path');
         const { execSync } = await import('child_process');
-
-        const __filename = fileURLToPath(import.meta.url);
-        const __dirname = dirname(__filename);
         const scriptPath = join(__dirname, '../scripts/import-mtgjson.js');
 
-        // Run import script with environment variables
+        // Startup import happens before the HTTP server listens, so blocking here
+        // does not interrupt active users.
         execSync(`node "${scriptPath}"`, {
           stdio: 'inherit',
           env: { ...process.env }
