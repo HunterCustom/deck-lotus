@@ -13,36 +13,35 @@ services:
       - PORT=3000
       - DATABASE_PATH=/app/data/deck-lotus.db
 
-      # ── Security (REQUIRED — change JWT_SECRET before deploying!) ──────────
-      - JWT_SECRET=${JWT_SECRET:-change-this-to-a-long-random-secret}
-      - JWT_EXPIRES_IN=7d
-      - JWT_REFRESH_EXPIRES_IN=30d
+      # ── Security ────────────────────────────────────────────────────────────
+      # Production startup refuses missing/known-default JWT secrets.
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set to a long random value}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-7d}
+      - JWT_REFRESH_EXPIRES_IN=${JWT_REFRESH_EXPIRES_IN:-30d}
 
       # ── Admin user (created on first startup if no admin exists) ───────────
+      # If ADMIN_PASSWORD is omitted, Deck Lotus generates a random password
+      # and prints it once during the first startup.
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme123}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
 
       # ── Mana Pool API (required for price monitoring & cart optimizer) ─────
-      # Generate your token at: https://manapool.com/seller/settings/integrations
-      # Both your account email and API token are required.
-      - MANAPOOL_USER_EMAIL=
-      - MANAPOOL_API_TOKEN=
+      - MANAPOOL_USER_EMAIL=${MANAPOOL_USER_EMAIL:-}
+      - MANAPOOL_API_TOKEN=${MANAPOOL_API_TOKEN:-}
 
-      # ── TCGPlayer API (optional fallback — keys no longer publicly issued) ──
+      # ── TCGPlayer API (optional fallback) ──────────────────────────────────
       - TCGPLAYER_CLIENT_ID=${TCGPLAYER_CLIENT_ID:-}
       - TCGPLAYER_CLIENT_SECRET=${TCGPLAYER_CLIENT_SECRET:-}
 
-      # ── ntfy push notifications (optional — for price alert notifications) ──
-      # Sign up free at https://ntfy.sh or self-host. Set a unique topic name.
+      # ── ntfy push notifications (optional) ─────────────────────────────────
       - NTFY_URL=${NTFY_URL:-https://ntfy.sh}
       - NTFY_TOPIC=${NTFY_TOPIC:-}
 
-      # ── Price check schedule (cron — default: every 6 hours) ───────────────
+      # ── Price check schedule ────────────────────────────────────────────────
       - PRICE_CHECK_SCHEDULE=${PRICE_CHECK_SCHEDULE:-0 */6 * * *}
 
-      # ── Data import (set to 'true' to force a full card data reimport) ──────
-      # User decks are preserved via UUIDs during reimport.
+      # ── Data import ─────────────────────────────────────────────────────────
       - FORCE_REIMPORT=${FORCE_REIMPORT:-false}
 
     volumes:
