@@ -28,12 +28,16 @@ export function showError(message, container = 'auth-error') {
   }
 }
 
+/**
+ * Show a modal whose body is intentionally supplied as trusted application HTML.
+ * The title is plain text and is always escaped.
+ */
 export function showModal(title, content) {
   const modal = document.getElementById('modal');
   const modalBody = document.getElementById('modal-body');
 
   modalBody.innerHTML = `
-    <h2>${title}</h2>
+    <h2>${escapeHtml(title)}</h2>
     <div>${content}</div>
   `;
 
@@ -68,7 +72,6 @@ export const closeDrawer = closeModal;
    Applies to every .modal and .drawer without per-component wiring.
 ------------------------------------------------------------------ */
 function closeTopLayer() {
-  // Overlays without data-persist can be dismissed with Esc/backdrop.
   const layers = document.querySelectorAll(
     '.modal:not(.hidden):not([data-persist]), .drawer:not(.hidden):not([data-persist])'
   );
@@ -81,7 +84,6 @@ document.addEventListener('keydown', (e) => {
 });
 
 document.addEventListener('click', (e) => {
-  // Any close button inside an overlay closes its overlay (always allowed)
   const closer = e.target.closest('.modal-close, .drawer-close, [data-close]');
   if (closer) {
     const layer = closer.closest('.modal, .drawer');
@@ -90,7 +92,6 @@ document.addEventListener('click', (e) => {
       return;
     }
   }
-  // Backdrop click (the overlay element itself, not its content)
   if (
     (e.target.classList.contains('modal') || e.target.classList.contains('drawer')) &&
     !e.target.hasAttribute('data-persist')
@@ -114,16 +115,12 @@ export function debounce(func, wait) {
 export function formatMana(manaCost) {
   if (!manaCost) return '';
 
-  // Convert mana cost to mana font icons
-  // {W} -> <i class="ms ms-w"></i>
   return manaCost.replace(/\{([^}]+)\}/g, (match, symbol) => {
     const sym = symbol.toLowerCase()
-      .replace('/', '')  // Handle split mana
-      .replace('p', 'p'); // Phyrexian mana
+      .replace('/', '')
+      .replace('p', 'p');
 
-    // Handle special cases
     if (symbol.includes('/')) {
-      // Split mana like {W/U}
       const parts = symbol.split('/');
       return `<i class="ms ms-${parts[0].toLowerCase()}${parts[1].toLowerCase()} ms-split"></i>`;
     }
@@ -139,14 +136,9 @@ export function formatDate(dateString) {
 
 export function formatOracleText(text) {
   if (!text) return '';
-  // Replace both actual newlines and escaped \n with <br>
   return text.replace(/\\n/g, '<br>').replace(/\n/g, '<br>');
 }
 
-/**
- * Show toast notification (styled via .toast CSS classes + Phosphor icon).
- * Signature is unchanged so existing call sites keep working.
- */
 export function showToast(message, type = 'success', duration = 3000) {
   let container = document.getElementById('toast-container');
   if (!container) {
@@ -182,8 +174,7 @@ export function showToast(message, type = 'success', duration = 3000) {
 }
 
 /**
- * Styled confirmation dialog — a drop-in replacement for native confirm().
- * Returns a Promise<boolean>.
+ * Styled confirmation dialog. All supplied labels/messages are plain text.
  */
 export function confirmDialog({
   title = 'Are you sure?',
@@ -196,15 +187,17 @@ export function confirmDialog({
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.className = 'modal';
-    const iconName = icon || (danger ? 'ph-warning' : 'ph-question');
+    const allowedIcons = new Set(['ph-warning', 'ph-question', 'ph-trash', 'ph-info']);
+    const requestedIcon = icon || (danger ? 'ph-warning' : 'ph-question');
+    const iconName = allowedIcons.has(requestedIcon) ? requestedIcon : 'ph-question';
     overlay.innerHTML = `
       <div class="modal-content modal-sm confirm-dialog ${danger ? 'confirm-danger' : ''}">
         <div class="confirm-icon"><i class="ph-fill ${iconName}"></i></div>
-        <h2>${title}</h2>
-        ${message ? `<p>${message}</p>` : ''}
+        <h2>${escapeHtml(title)}</h2>
+        ${message ? `<p>${escapeHtml(message)}</p>` : ''}
         <div class="modal-footer">
-          <button class="btn btn-ghost" data-act="cancel">${cancelText}</button>
-          <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-act="ok">${confirmText}</button>
+          <button class="btn btn-ghost" data-act="cancel">${escapeHtml(cancelText)}</button>
+          <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-act="ok">${escapeHtml(confirmText)}</button>
         </div>
       </div>`;
     document.body.appendChild(overlay);
@@ -228,10 +221,6 @@ export function confirmDialog({
   });
 }
 
-/**
- * Anchored popover. Pass an anchor element and a content element; returns
- * { el, close }. Closes on outside-click or Esc. Reuses .popover styling.
- */
 export function popover(anchorEl, contentEl, { align = 'left', gap = 6 } = {}) {
   const pop = document.createElement('div');
   pop.className = 'popover';
