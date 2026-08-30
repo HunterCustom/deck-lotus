@@ -8,337 +8,363 @@ import { dirname } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Backup configuration
 const DATA_DIR = process.env.DATA_PATH || path.join(__dirname, '../../data');
 const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+const CONFIG_FILE = path.join(DATA_DIR, 'backup-config.json');
 
-// Ensure backup directory exists
-if (!fs.existsSync(BACKUP_DIR)) {
-  fs.mkdirSync(BACKUP_DIR, { recursive: true });
-}
+if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
-// Scheduled backup state
-let scheduledBackupJob = null;
-let backupConfig = {
+const DEFAULT_CONFIG = {
   enabled: false,
-  frequency: 'daily', // daily, 6hours, 12hours, weekly
-  retainCount: 10, // Keep last N backups
-  lastRun: null
+  frequency: 'daily',
+  retainCount: 10,
+  lastRun: null,
 };
 
+function readBackupConfig() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    return { ...DEFAULT_CONFIG, ...(parsed && typeof parsed === 'object' ? parsed : {}) };
+  } catch {
+    return { ...DEFAULT_CONFIG };
+  }
+}
+
+function persistBackupConfig() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(backupConfig, null, 2), 'utf8');
+}
+
+let scheduledBackupJob = null;
+let backupConfig = readBackupConfig();
+
+function placeholders(values) {
+  return values.map(() => '?').join(',');
+}
+
+function safeBackupPath(filename) {
+  if (typeof filename !== 'string' || !filename || path.basename(filename) !== filename || !filename.endsWith('.json')) {
+    throw new Error('Invalid backup filename');
+  }
+
+  const root = path.resolve(BACKUP_DIR);
+  const resolved = path.resolve(BACKUP_DIR, filename);
+  if (!resolved.startsWith(root + path.sep)) {
+    throw new Error('Invalid backup filename');
+  }
+  return resolved;
+}
+
 /**
- * Create a backup of all user data (users, decks, deck_cards, api_keys)
- * Returns a JSON object with all user data
+ * Create a portable backup of user-owned data. Card and printing references are
+ * stored by stable card name / MTGJSON UUID so they survive card-data refreshes.
  */
 export function createBackup(userId = null) {
   const db = getDb();
+  const users = userId
+    ? db.prepare(`SELECT id, username, email, password_hash, is_admin, created_at, updated_at FROM users WHERE id = ?`).all(userId)
+    : db.prepare(`SELECT id, username, email, password_hash, is_admin, created_at, updated_at FROM users`).all();
 
   const backup = {
-    version: '1.0',
+    version: '1.1',
     timestamp: new Date().toISOString(),
-    data: {}
+    data: {
+      users,
+      api_keys: [],
+      owned_cards: [],
+      owned_printings: [],
+      decks: [],
+      deck_cards: [],
+      deck_shares: [],
+      price_watches: [],
+      price_check_log: [],
+    },
   };
 
-  // If userId is provided, only backup that user's data
-  // Otherwise, backup all users
-  const userFilter = userId ? `WHERE id = ${userId}` : '';
-  const userIdFilter = userId ? `WHERE user_id = ${userId}` : '';
+  const userIds = users.map(u => u.id);
+  if (!userIds.length) return backup;
+  const userPh = placeholders(userIds);
 
-  // Backup users
-  backup.data.users = db.prepare(`
-    SELECT id, username, email, password_hash, is_admin, created_at, updated_at
-    FROM users
-    ${userFilter}
-  `).all();
-
-  // Get list of user IDs to backup
-  const userIds = backup.data.users.map(u => u.id);
-
-  if (userIds.length === 0) {
-    return backup; // No users to backup
-  }
-
-  const userIdsStr = userIds.join(',');
-
-  // Backup API keys
   backup.data.api_keys = db.prepare(`
     SELECT id, user_id, key_hash, name, last_used, created_at
-    FROM api_keys
-    WHERE user_id IN (${userIdsStr})
-  `).all();
+    FROM api_keys WHERE user_id IN (${userPh})
+  `).all(...userIds);
 
-  // Backup owned cards (with card names for stability across imports)
   backup.data.owned_cards = db.prepare(`
-    SELECT oc.id, oc.user_id, oc.quantity, oc.created_at, oc.updated_at,
-           c.name as card_name
+    SELECT oc.user_id, oc.quantity, oc.created_at, oc.updated_at, c.name AS card_name
     FROM owned_cards oc
-    JOIN cards c ON oc.card_id = c.id
-    WHERE oc.user_id IN (${userIdsStr})
-  `).all();
+    JOIN cards c ON c.id = oc.card_id
+    WHERE oc.user_id IN (${userPh})
+  `).all(...userIds);
 
-  // Backup decks
+  backup.data.owned_printings = db.prepare(`
+    SELECT op.user_id, op.quantity, op.created_at, op.updated_at, p.uuid AS printing_uuid
+    FROM owned_printings op
+    JOIN printings p ON p.id = op.printing_id
+    WHERE op.user_id IN (${userPh})
+  `).all(...userIds);
+
   backup.data.decks = db.prepare(`
     SELECT id, user_id, name, format, description, created_at, updated_at
-    FROM decks
-    WHERE user_id IN (${userIdsStr})
-  `).all();
+    FROM decks WHERE user_id IN (${userPh})
+  `).all(...userIds);
 
-  // Get deck IDs
   const deckIds = backup.data.decks.map(d => d.id);
-
-  if (deckIds.length > 0) {
-    const deckIdsStr = deckIds.join(',');
-
-    // Backup deck_cards with UUIDs (stable across imports)
+  if (deckIds.length) {
+    const deckPh = placeholders(deckIds);
     backup.data.deck_cards = db.prepare(`
       SELECT dc.id, dc.deck_id, dc.quantity, dc.is_sideboard, dc.is_commander,
-             dc.board_type, dc.added_at, p.uuid as printing_uuid
+             dc.board_type, dc.added_at, p.uuid AS printing_uuid
       FROM deck_cards dc
-      JOIN printings p ON dc.printing_id = p.id
-      WHERE dc.deck_id IN (${deckIdsStr})
-    `).all();
+      JOIN printings p ON p.id = dc.printing_id
+      WHERE dc.deck_id IN (${deckPh})
+    `).all(...deckIds);
 
-    // Backup deck shares
     backup.data.deck_shares = db.prepare(`
       SELECT id, deck_id, user_id, share_token, is_active, created_at, expires_at
-      FROM deck_shares
-      WHERE deck_id IN (${deckIdsStr})
-    `).all();
-  } else {
-    backup.data.deck_cards = [];
-    backup.data.deck_shares = [];
+      FROM deck_shares WHERE deck_id IN (${deckPh})
+    `).all(...deckIds);
+  }
+
+  backup.data.price_watches = db.prepare(`
+    SELECT * FROM price_watches WHERE user_id IN (${userPh})
+  `).all(...userIds);
+
+  const watchIds = backup.data.price_watches.map(w => w.id);
+  if (watchIds.length) {
+    backup.data.price_check_log = db.prepare(`
+      SELECT * FROM price_check_log WHERE watch_id IN (${placeholders(watchIds)})
+    `).all(...watchIds);
   }
 
   return backup;
 }
 
 /**
- * Restore user data from a backup JSON object
- * Options:
- * - overwrite: if true, delete existing data before restore (default: false)
- * - userId: if provided, only restore data for this user (requires matching user in backup)
+ * Restore backup data. When a normal user restores their own backup, their
+ * current admin state is preserved and backup IDs are never allowed to replace
+ * another user's rows.
  */
 export function restoreBackup(backupData, options = {}) {
+  if (!backupData?.version || !backupData?.data) throw new Error('Invalid backup format');
+
   const db = getDb();
   const { overwrite = false, userId = null } = options;
+  let usersToRestore = backupData.data.users || [];
+
+  if (userId !== null) {
+    usersToRestore = usersToRestore.filter(u => Number(u.id) === Number(userId));
+    if (!usersToRestore.length) throw new Error(`User ${userId} not found in backup`);
+    if (!db.prepare('SELECT id FROM users WHERE id = ?').get(userId)) {
+      throw new Error('Authenticated user no longer exists');
+    }
+  }
 
   const results = {
     users: 0,
     api_keys: 0,
     owned_cards: 0,
+    owned_printings: 0,
     decks: 0,
     deck_cards: 0,
     deck_shares: 0,
-    errors: []
+    price_watches: 0,
+    price_check_log: 0,
+    errors: [],
   };
 
-  // Validate backup format
-  if (!backupData.version || !backupData.data) {
-    throw new Error('Invalid backup format');
-  }
-
-  // If userId is specified, filter backup to only that user
-  let usersToRestore = backupData.data.users || [];
-  if (userId) {
-    usersToRestore = usersToRestore.filter(u => u.id === userId);
-    if (usersToRestore.length === 0) {
-      throw new Error(`User ${userId} not found in backup`);
-    }
-  }
-
-  // Start transaction
   const restore = db.transaction(() => {
-    // If overwrite is enabled, delete existing data
-    if (overwrite && userId) {
+    if (overwrite && userId !== null) {
+      db.prepare('DELETE FROM price_watches WHERE user_id = ?').run(userId);
       db.prepare('DELETE FROM api_keys WHERE user_id = ?').run(userId);
+      db.prepare('DELETE FROM owned_printings WHERE user_id = ?').run(userId);
       db.prepare('DELETE FROM owned_cards WHERE user_id = ?').run(userId);
       db.prepare('DELETE FROM deck_cards WHERE deck_id IN (SELECT id FROM decks WHERE user_id = ?)').run(userId);
       db.prepare('DELETE FROM deck_shares WHERE deck_id IN (SELECT id FROM decks WHERE user_id = ?)').run(userId);
       db.prepare('DELETE FROM decks WHERE user_id = ?').run(userId);
-      // Don't delete the user itself, just update it
-    } else if (overwrite && !userId) {
+    } else if (overwrite) {
+      db.prepare('DELETE FROM price_check_log').run();
+      db.prepare('DELETE FROM price_watches').run();
       db.prepare('DELETE FROM deck_cards').run();
       db.prepare('DELETE FROM deck_shares').run();
       db.prepare('DELETE FROM decks').run();
       db.prepare('DELETE FROM api_keys').run();
+      db.prepare('DELETE FROM owned_printings').run();
       db.prepare('DELETE FROM owned_cards').run();
       db.prepare('DELETE FROM users').run();
     }
 
-    // Restore users
-    const insertUser = db.prepare(`
-      INSERT OR REPLACE INTO users (id, username, email, password_hash, is_admin, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
+    const restoredUserIds = usersToRestore.map(u => Number(u.id));
 
     for (const user of usersToRestore) {
       try {
-        insertUser.run(
-          user.id,
-          user.username,
-          user.email,
-          user.password_hash,
-          user.is_admin || 0,
-          user.created_at,
-          user.updated_at
-        );
+        const existing = db.prepare('SELECT is_admin FROM users WHERE id = ?').get(user.id);
+        const isAdmin = userId !== null && existing ? existing.is_admin : (user.is_admin || 0);
+        db.prepare(`
+          INSERT INTO users (id, username, email, password_hash, is_admin, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            username = excluded.username,
+            email = excluded.email,
+            password_hash = excluded.password_hash,
+            is_admin = excluded.is_admin,
+            updated_at = excluded.updated_at
+        `).run(user.id, user.username, user.email, user.password_hash, isAdmin, user.created_at, user.updated_at);
         results.users++;
       } catch (e) {
         results.errors.push(`User ${user.username}: ${e.message}`);
       }
     }
 
-    const restoredUserIds = usersToRestore.map(u => u.id);
-
-    // Restore API keys
-    const apiKeys = (backupData.data.api_keys || []).filter(k =>
-      restoredUserIds.includes(k.user_id)
-    );
-
-    const insertApiKey = db.prepare(`
-      INSERT OR REPLACE INTO api_keys (id, user_id, key_hash, name, last_used, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-
-    for (const key of apiKeys) {
+    for (const key of (backupData.data.api_keys || []).filter(k => restoredUserIds.includes(Number(k.user_id)))) {
       try {
-        insertApiKey.run(
-          key.id,
-          key.user_id,
-          key.key_hash,
-          key.name,
-          key.last_used,
-          key.created_at
-        );
+        if (userId !== null) {
+          db.prepare(`INSERT OR IGNORE INTO api_keys (user_id, key_hash, name, last_used, created_at) VALUES (?, ?, ?, ?, ?)`)
+            .run(userId, key.key_hash, key.name, key.last_used, key.created_at);
+          db.prepare(`UPDATE api_keys SET name = ?, last_used = ? WHERE user_id = ? AND key_hash = ?`)
+            .run(key.name, key.last_used, userId, key.key_hash);
+        } else {
+          db.prepare(`INSERT INTO api_keys (id, user_id, key_hash, name, last_used, created_at) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET user_id=excluded.user_id, key_hash=excluded.key_hash, name=excluded.name, last_used=excluded.last_used`)
+            .run(key.id, key.user_id, key.key_hash, key.name, key.last_used, key.created_at);
+        }
         results.api_keys++;
       } catch (e) {
         results.errors.push(`API key ${key.name}: ${e.message}`);
       }
     }
 
-    // Restore owned cards (using card names to find current card_ids)
-    const ownedCards = (backupData.data.owned_cards || []).filter(oc =>
-      restoredUserIds.includes(oc.user_id)
-    );
-
-    const getCardId = db.prepare(`
-      SELECT id FROM cards WHERE name = ? LIMIT 1
-    `);
-
-    const insertOwnedCard = db.prepare(`
-      INSERT OR REPLACE INTO owned_cards (user_id, card_id, quantity, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-
-    for (const ownedCard of ownedCards) {
+    const getCardId = db.prepare('SELECT id FROM cards WHERE name = ? LIMIT 1');
+    for (const owned of (backupData.data.owned_cards || []).filter(o => restoredUserIds.includes(Number(o.user_id)))) {
       try {
-        const card = getCardId.get(ownedCard.card_name);
-        if (card) {
-          insertOwnedCard.run(
-            ownedCard.user_id,
-            card.id,
-            ownedCard.quantity,
-            ownedCard.created_at,
-            ownedCard.updated_at
-          );
-          results.owned_cards++;
-        } else {
-          results.errors.push(`Card "${ownedCard.card_name}" not found in database`);
-        }
+        const card = getCardId.get(owned.card_name);
+        if (!card) throw new Error('card not found in current database');
+        db.prepare(`
+          INSERT INTO owned_cards (user_id, card_id, quantity, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(user_id, card_id) DO UPDATE SET quantity=excluded.quantity, updated_at=excluded.updated_at
+        `).run(owned.user_id, card.id, owned.quantity, owned.created_at, owned.updated_at);
+        results.owned_cards++;
       } catch (e) {
-        results.errors.push(`Owned card ${ownedCard.card_name}: ${e.message}`);
+        results.errors.push(`Owned card ${owned.card_name}: ${e.message}`);
       }
     }
 
-    // Restore decks
-    const decks = (backupData.data.decks || []).filter(d =>
-      restoredUserIds.includes(d.user_id)
-    );
+    const getPrintingId = db.prepare('SELECT id FROM printings WHERE uuid = ? LIMIT 1');
+    for (const owned of (backupData.data.owned_printings || []).filter(o => restoredUserIds.includes(Number(o.user_id)))) {
+      try {
+        const printing = getPrintingId.get(owned.printing_uuid);
+        if (!printing) throw new Error('printing not found in current database');
+        db.prepare(`
+          INSERT INTO owned_printings (user_id, printing_id, quantity, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(user_id, printing_id) DO UPDATE SET quantity=excluded.quantity, updated_at=excluded.updated_at
+        `).run(owned.user_id, printing.id, owned.quantity, owned.created_at, owned.updated_at);
+        results.owned_printings++;
+      } catch (e) {
+        results.errors.push(`Owned printing ${owned.printing_uuid}: ${e.message}`);
+      }
+    }
 
-    const insertDeck = db.prepare(`
-      INSERT OR REPLACE INTO decks (id, user_id, name, format, description, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
+    const deckMap = new Map();
+    const decks = (backupData.data.decks || []).filter(d => restoredUserIds.includes(Number(d.user_id)));
     for (const deck of decks) {
       try {
-        insertDeck.run(
-          deck.id,
-          deck.user_id,
-          deck.name,
-          deck.format,
-          deck.description,
-          deck.created_at,
-          deck.updated_at
-        );
+        let newId = deck.id;
+        const collision = db.prepare('SELECT user_id FROM decks WHERE id = ?').get(deck.id);
+        if (userId !== null && collision && Number(collision.user_id) !== Number(userId)) {
+          const inserted = db.prepare(`INSERT INTO decks (user_id, name, format, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+            .run(userId, deck.name, deck.format, deck.description, deck.created_at, deck.updated_at);
+          newId = Number(inserted.lastInsertRowid);
+        } else {
+          db.prepare(`
+            INSERT INTO decks (id, user_id, name, format, description, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET user_id=excluded.user_id, name=excluded.name, format=excluded.format,
+              description=excluded.description, updated_at=excluded.updated_at
+          `).run(deck.id, deck.user_id, deck.name, deck.format, deck.description, deck.created_at, deck.updated_at);
+        }
+        deckMap.set(Number(deck.id), Number(newId));
         results.decks++;
       } catch (e) {
         results.errors.push(`Deck ${deck.name}: ${e.message}`);
       }
     }
 
-    const restoredDeckIds = decks.map(d => d.id);
-
-    // Restore deck_cards (using UUIDs to find current printing_ids)
-    const deckCards = (backupData.data.deck_cards || []).filter(dc =>
-      restoredDeckIds.includes(dc.deck_id)
-    );
-
-    const getPrintingId = db.prepare(`
-      SELECT id FROM printings WHERE uuid = ? LIMIT 1
-    `);
-
-    const insertDeckCard = db.prepare(`
-      INSERT OR REPLACE INTO deck_cards (deck_id, printing_id, quantity, is_sideboard, is_commander, board_type, added_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    for (const deckCard of deckCards) {
+    for (const card of backupData.data.deck_cards || []) {
+      const mappedDeckId = deckMap.get(Number(card.deck_id));
+      if (!mappedDeckId) continue;
       try {
-        const printing = getPrintingId.get(deckCard.printing_uuid);
-        if (printing) {
-          insertDeckCard.run(
-            deckCard.deck_id,
-            printing.id,
-            deckCard.quantity,
-            deckCard.is_sideboard,
-            deckCard.is_commander,
-            deckCard.board_type || 'mainboard',
-            deckCard.added_at
-          );
-          results.deck_cards++;
-        } else {
-          results.errors.push(`Printing UUID ${deckCard.printing_uuid} not found in database`);
-        }
+        const printing = getPrintingId.get(card.printing_uuid);
+        if (!printing) throw new Error('printing not found in current database');
+        const boardType = card.board_type || (card.is_sideboard ? 'sideboard' : 'mainboard');
+        db.prepare(`
+          INSERT INTO deck_cards (deck_id, printing_id, quantity, is_sideboard, is_commander, board_type, added_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(deck_id, printing_id, is_sideboard) DO UPDATE SET
+            quantity=excluded.quantity, is_commander=excluded.is_commander, board_type=excluded.board_type
+        `).run(mappedDeckId, printing.id, card.quantity, card.is_sideboard || 0, card.is_commander || 0, boardType, card.added_at);
+        results.deck_cards++;
       } catch (e) {
-        results.errors.push(`Deck card: ${e.message}`);
+        results.errors.push(`Deck card ${card.printing_uuid}: ${e.message}`);
       }
     }
 
-    // Restore deck shares
-    const deckShares = (backupData.data.deck_shares || []).filter(ds =>
-      restoredDeckIds.includes(ds.deck_id)
-    );
-
-    const insertDeckShare = db.prepare(`
-      INSERT OR REPLACE INTO deck_shares (id, deck_id, user_id, share_token, is_active, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    for (const share of deckShares) {
+    for (const share of backupData.data.deck_shares || []) {
+      const mappedDeckId = deckMap.get(Number(share.deck_id));
+      if (!mappedDeckId) continue;
       try {
-        insertDeckShare.run(
-          share.id,
-          share.deck_id,
-          share.user_id,
-          share.share_token,
-          share.is_active,
-          share.created_at,
-          share.expires_at
-        );
+        db.prepare(`INSERT OR IGNORE INTO deck_shares (deck_id, user_id, share_token, is_active, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`)
+          .run(mappedDeckId, share.user_id, share.share_token, share.is_active, share.created_at, share.expires_at);
         results.deck_shares++;
       } catch (e) {
         results.errors.push(`Deck share: ${e.message}`);
+      }
+    }
+
+    const watchMap = new Map();
+    for (const watch of (backupData.data.price_watches || []).filter(w => restoredUserIds.includes(Number(w.user_id)))) {
+      try {
+        const values = [watch.user_id, watch.card_name, watch.max_price, watch.condition, watch.notes, watch.is_active,
+          watch.expires_at, watch.last_checked, watch.last_price, watch.last_notified, watch.created_at,
+          watch.card_id, watch.scryfall_id, watch.image_url, watch.set_code, watch.set_name];
+        let newId = watch.id;
+        const collision = db.prepare('SELECT user_id FROM price_watches WHERE id = ?').get(watch.id);
+        if (userId !== null && collision && Number(collision.user_id) !== Number(userId)) {
+          const inserted = db.prepare(`
+            INSERT INTO price_watches (user_id, card_name, max_price, condition, notes, is_active, expires_at,
+              last_checked, last_price, last_notified, created_at, card_id, scryfall_id, image_url, set_code, set_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(...values);
+          newId = Number(inserted.lastInsertRowid);
+        } else {
+          db.prepare(`
+            INSERT INTO price_watches (id, user_id, card_name, max_price, condition, notes, is_active, expires_at,
+              last_checked, last_price, last_notified, created_at, card_id, scryfall_id, image_url, set_code, set_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET card_name=excluded.card_name, max_price=excluded.max_price,
+              condition=excluded.condition, notes=excluded.notes, is_active=excluded.is_active, expires_at=excluded.expires_at,
+              last_checked=excluded.last_checked, last_price=excluded.last_price, last_notified=excluded.last_notified,
+              card_id=excluded.card_id, scryfall_id=excluded.scryfall_id, image_url=excluded.image_url,
+              set_code=excluded.set_code, set_name=excluded.set_name
+          `).run(watch.id, ...values);
+        }
+        watchMap.set(Number(watch.id), Number(newId));
+        results.price_watches++;
+      } catch (e) {
+        results.errors.push(`Price watch ${watch.card_name}: ${e.message}`);
+      }
+    }
+
+    for (const log of backupData.data.price_check_log || []) {
+      const mappedWatchId = watchMap.get(Number(log.watch_id));
+      if (!mappedWatchId) continue;
+      try {
+        db.prepare(`INSERT INTO price_check_log (watch_id, checked_at, found_price, notified) VALUES (?, ?, ?, ?)`)
+          .run(mappedWatchId, log.checked_at, log.found_price, log.notified || 0);
+        results.price_check_log++;
+      } catch (e) {
+        results.errors.push(`Price history: ${e.message}`);
       }
     }
   });
@@ -347,178 +373,106 @@ export function restoreBackup(backupData, options = {}) {
   return results;
 }
 
-/**
- * Export backup to a file
- */
 export function exportBackupToFile(backupData, filePath) {
   fs.writeFileSync(filePath, JSON.stringify(backupData, null, 2), 'utf8');
 }
 
-/**
- * Import backup from a file
- */
 export function importBackupFromFile(filePath) {
-  const data = fs.readFileSync(filePath, 'utf8');
-  return JSON.parse(data);
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
-/**
- * Create and save a backup to the backups directory
- */
 export function createScheduledBackup() {
-  const backup = createBackup(); // Backup all users
-  const timestamp = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  const backup = createBackup();
+  const timestamp = new Date().toISOString().split('T')[0];
   const filename = `scheduled-backup-${timestamp}-${Date.now()}.json`;
-  const filepath = path.join(BACKUP_DIR, filename);
-
+  const filepath = safeBackupPath(filename);
   exportBackupToFile(backup, filepath);
   backupConfig.lastRun = new Date().toISOString();
-
-  console.log(`✓ Scheduled backup created: ${filename}`);
-
-  // Clean up old backups based on retention policy
+  persistBackupConfig();
   cleanupOldBackups();
-
+  console.log(`✓ Scheduled backup created: ${filename}`);
   return { filename, filepath, timestamp: backup.timestamp };
 }
 
-/**
- * Clean up old backups, keeping only the most recent N backups
- */
 export function cleanupOldBackups() {
   try {
     const files = fs.readdirSync(BACKUP_DIR)
       .filter(f => f.startsWith('scheduled-backup-') && f.endsWith('.json'))
-      .map(f => ({
-        name: f,
-        path: path.join(BACKUP_DIR, f),
-        mtime: fs.statSync(path.join(BACKUP_DIR, f)).mtime.getTime()
-      }))
-      .sort((a, b) => b.mtime - a.mtime); // Sort by modified time, newest first
+      .map(name => ({ name, mtime: fs.statSync(safeBackupPath(name)).mtime.getTime() }))
+      .sort((a, b) => b.mtime - a.mtime);
 
-    const toDelete = files.slice(backupConfig.retainCount);
-
-    toDelete.forEach(file => {
-      fs.unlinkSync(file.path);
-      console.log(`  🗑️  Deleted old backup: ${file.name}`);
-    });
-
-    if (toDelete.length > 0) {
-      console.log(`✓ Cleaned up ${toDelete.length} old backup(s), kept ${Math.min(files.length, backupConfig.retainCount)}`);
-    }
+    for (const file of files.slice(backupConfig.retainCount)) fs.unlinkSync(safeBackupPath(file.name));
   } catch (error) {
     console.error('Error cleaning up old backups:', error.message);
   }
 }
 
-/**
- * Get list of available backup files
- */
 export function listBackups() {
-  try {
-    const files = fs.readdirSync(BACKUP_DIR)
-      .filter(f => f.endsWith('.json'))
-      .map(f => {
-        const filepath = path.join(BACKUP_DIR, f);
-        const stats = fs.statSync(filepath);
-        return {
-          filename: f,
-          size: stats.size,
-          created: stats.mtime.toISOString(),
-          type: f.startsWith('scheduled-backup-') ? 'scheduled' :
-                f.startsWith('pre-sync-safety') ? 'pre-sync' : 'manual'
-        };
-      })
-      .sort((a, b) => new Date(b.created) - new Date(a.created)); // Newest first
-
-    return files;
-  } catch (error) {
-    console.error('Error listing backups:', error.message);
-    return [];
-  }
+  return fs.readdirSync(BACKUP_DIR)
+    .filter(f => f.endsWith('.json') && path.basename(f) === f)
+    .map(filename => {
+      const stats = fs.statSync(safeBackupPath(filename));
+      return {
+        filename,
+        size: stats.size,
+        created: stats.mtime.toISOString(),
+        type: filename.startsWith('scheduled-backup-') ? 'scheduled' : filename.startsWith('pre-sync-safety') ? 'pre-sync' : 'manual',
+      };
+    })
+    .sort((a, b) => new Date(b.created) - new Date(a.created));
 }
 
-/**
- * Load a backup file by filename
- */
 export function loadBackupFile(filename) {
-  const filepath = path.join(BACKUP_DIR, filename);
-  if (!fs.existsSync(filepath)) {
-    throw new Error(`Backup file not found: ${filename}`);
-  }
+  const filepath = safeBackupPath(filename);
+  if (!fs.existsSync(filepath)) throw new Error(`Backup file not found: ${filename}`);
   return importBackupFromFile(filepath);
 }
 
-/**
- * Delete a backup file
- */
 export function deleteBackupFile(filename) {
-  const filepath = path.join(BACKUP_DIR, filename);
-  if (!fs.existsSync(filepath)) {
-    throw new Error(`Backup file not found: ${filename}`);
-  }
+  const filepath = safeBackupPath(filename);
+  if (!fs.existsSync(filepath)) throw new Error(`Backup file not found: ${filename}`);
   fs.unlinkSync(filepath);
-  console.log(`✓ Deleted backup: ${filename}`);
   return { success: true };
 }
 
-/**
- * Configure scheduled backups
- */
-export function configureScheduledBackups(config) {
-  const { enabled, frequency, retainCount } = config;
+function scheduleExpression(frequency) {
+  switch (frequency) {
+    case '6hours': return '0 */6 * * *';
+    case '12hours': return '0 */12 * * *';
+    case 'weekly': return '0 2 * * 0';
+    case 'daily': return '0 2 * * *';
+    default: throw new Error('Invalid backup frequency');
+  }
+}
 
-  if (enabled !== undefined) backupConfig.enabled = enabled;
-  if (frequency !== undefined) backupConfig.frequency = frequency;
-  if (retainCount !== undefined) backupConfig.retainCount = retainCount;
+export function configureScheduledBackups(config = {}) {
+  if (config.enabled !== undefined) backupConfig.enabled = !!config.enabled;
+  if (config.frequency !== undefined) backupConfig.frequency = config.frequency;
+  if (config.retainCount !== undefined) {
+    const retainCount = Number(config.retainCount);
+    if (!Number.isInteger(retainCount) || retainCount < 1 || retainCount > 100) throw new Error('retainCount must be between 1 and 100');
+    backupConfig.retainCount = retainCount;
+  }
 
-  // Stop existing job if any
   if (scheduledBackupJob) {
     scheduledBackupJob.stop();
     scheduledBackupJob = null;
   }
 
-  // Start new job if enabled
   if (backupConfig.enabled) {
-    let cronExpression;
-
-    switch (backupConfig.frequency) {
-      case '6hours':
-        cronExpression = '0 */6 * * *'; // Every 6 hours
-        break;
-      case '12hours':
-        cronExpression = '0 */12 * * *'; // Every 12 hours
-        break;
-      case 'daily':
-        cronExpression = '0 2 * * *'; // Every day at 2 AM
-        break;
-      case 'weekly':
-        cronExpression = '0 2 * * 0'; // Every Sunday at 2 AM
-        break;
-      default:
-        cronExpression = '0 2 * * *'; // Default to daily
-    }
-
-    scheduledBackupJob = cron.schedule(cronExpression, () => {
-      console.log(`\n⏰ Running scheduled backup (${backupConfig.frequency})...`);
-      try {
-        createScheduledBackup();
-      } catch (error) {
-        console.error('Scheduled backup failed:', error.message);
-      }
+    scheduledBackupJob = cron.schedule(scheduleExpression(backupConfig.frequency), () => {
+      try { createScheduledBackup(); } catch (error) { console.error('Scheduled backup failed:', error.message); }
     });
-
-    console.log(`✓ Scheduled backups enabled: ${backupConfig.frequency} (keeping last ${backupConfig.retainCount})`);
-  } else {
-    console.log('✓ Scheduled backups disabled');
   }
 
-  return backupConfig;
+  persistBackupConfig();
+  return getBackupConfig();
 }
 
-/**
- * Get current backup configuration
- */
+export function setupScheduledBackups() {
+  configureScheduledBackups(backupConfig);
+}
+
 export function getBackupConfig() {
   return { ...backupConfig };
 }
