@@ -1,5 +1,5 @@
 import api from '../services/api.js';
-import { showToast, debounce, confirmDialog, openDrawer, closeDrawer } from '../utils/ui.js';
+import { showToast, debounce, confirmDialog, openDrawer, closeDrawer, escapeHtml } from '../utils/ui.js';
 
 const CONDITIONS = { any: 'Any', nm: 'NM', lp: 'LP', mp: 'MP', hp: 'HP', dm: 'DM' };
 
@@ -65,7 +65,7 @@ function renderWatches(watches) {
               <span>Current: <strong style="color: ${priceColor};">${formatPrice(price)}</strong></span>
               ${w.expires_at ? `<span>Expires: <strong style="color:var(--text-primary);">${w.expires_at.slice(0,10)}</strong></span>` : ''}
             </div>
-            ${w.notes ? `<div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem; font-style: italic;">${w.notes}</div>` : ''}
+            ${w.notes ? `<div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem; font-style: italic;">${escapeHtml(w.notes)}</div>` : ''}
             <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">Last checked: ${w.last_checked ? formatDate(w.last_checked) : 'Never'}</div>
           </div>
         </div>
