@@ -3,9 +3,9 @@ import {
   getInventory,
   getInventoryStats,
   searchCardsForInventoryAdd,
-  bulkAddToInventory,
   getOwnedSets,
 } from '../services/inventoryService.js';
+import { bulkAddToInventory } from '../services/inventoryBulkImportService.js';
 import { setOwnedPrintingQuantity } from '../services/cardService.js';
 import { authenticate } from '../middleware/auth.js';
 
