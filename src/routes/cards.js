@@ -13,10 +13,12 @@ import {
   getUserOwnedCards,
   getCardOwnershipStatus,
   getCardOwnedPrintings,
-  setOwnedPrintingQuantity,
-  swapOwnedPrinting,
-  getCardOwnershipAndUsage,
 } from '../services/cardService.js';
+import {
+  getCardOwnershipAndUsageFinishAware,
+  setOwnedPrintingQuantityFinishAware,
+  swapOwnedPrintingFinishAware,
+} from '../services/finishAwareOwnershipService.js';
 import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -71,7 +73,6 @@ router.get('/search', authenticate, (req, res, next) => {
   }
 });
 
-
 /**
  * GET /api/cards/random
  * Get random cards
@@ -101,7 +102,7 @@ router.get('/stats', authenticate, (req, res, next) => {
 
 /**
  * GET /api/cards/subtypes
- * Get all unique subtypes
+ * Get all unique card subtypes
  */
 router.get('/subtypes', authenticate, (req, res, next) => {
   try {
@@ -113,33 +114,14 @@ router.get('/subtypes', authenticate, (req, res, next) => {
 });
 
 /**
- * GET /api/cards/:id
- * Get card by ID with all printings
+ * GET /api/cards/owned/all
+ * Get all owned cards for the authenticated user
  */
-router.get('/:id', authenticate, (req, res, next) => {
+router.get('/owned/all', authenticate, (req, res, next) => {
   try {
-    const cardId = parseInt(req.params.id);
-    const card = getCardById(cardId);
-
-    if (!card) {
-      return res.status(404).json({ error: 'Card not found' });
-    }
-
-    res.json({ card });
-  } catch (error) {
-    next(error);
-  }
-});
-
-/**
- * GET /api/cards/:id/printings
- * Get all printings for a card
- */
-router.get('/:id/printings', authenticate, (req, res, next) => {
-  try {
-    const cardId = parseInt(req.params.id);
-    const printings = getCardPrintings(cardId);
-    res.json({ printings });
+    const userId = req.user.id;
+    const ownedCards = getUserOwnedCards(userId);
+    res.json({ ownedCards });
   } catch (error) {
     next(error);
   }
@@ -182,6 +164,72 @@ router.get('/printing/:uuid', authenticate, (req, res, next) => {
 });
 
 /**
+ * POST /api/cards/printings/:printingId/swap
+ * Atomically move one owned finish to another printing
+ */
+router.post('/printings/:printingId/swap', authenticate, (req, res, next) => {
+  try {
+    const fromPrintingId = parseInt(req.params.printingId);
+    const toPrintingId = parseInt(req.body.replacementPrintingId);
+    const finish = req.body.finish || 'nonfoil';
+
+    if (!Number.isInteger(toPrintingId)) {
+      return res.status(400).json({ error: 'replacementPrintingId is required' });
+    }
+
+    const result = swapOwnedPrintingFinishAware(
+      req.user.id,
+      fromPrintingId,
+      toPrintingId,
+      finish
+    );
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/cards/printings/:printingId/quantity
+ * Set owned quantity for one printing + finish combination
+ */
+router.post('/printings/:printingId/quantity', authenticate, (req, res, next) => {
+  try {
+    const printingId = parseInt(req.params.printingId);
+    const userId = req.user.id;
+    const { quantity, finish = 'nonfoil' } = req.body;
+
+    if (quantity === undefined || quantity === null) {
+      return res.status(400).json({ error: 'Quantity is required' });
+    }
+
+    const result = setOwnedPrintingQuantityFinishAware(
+      userId,
+      printingId,
+      parseInt(quantity),
+      finish
+    );
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/cards/:id/printings
+ * Get all printings for a card
+ */
+router.get('/:id/printings', authenticate, (req, res, next) => {
+  try {
+    const cardId = parseInt(req.params.id);
+    const printings = getCardPrintings(cardId);
+    res.json({ printings });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * POST /api/cards/:id/owned
  * Toggle card ownership for the authenticated user
  */
@@ -192,20 +240,6 @@ router.post('/:id/owned', authenticate, (req, res, next) => {
 
     const result = toggleCardOwnership(userId, cardId);
     res.json(result);
-  } catch (error) {
-    next(error);
-  }
-});
-
-/**
- * GET /api/cards/owned
- * Get all owned cards for the authenticated user
- */
-router.get('/owned/all', authenticate, (req, res, next) => {
-  try {
-    const userId = req.user.id;
-    const ownedCards = getUserOwnedCards(userId);
-    res.json({ ownedCards });
   } catch (error) {
     next(error);
   }
@@ -229,14 +263,14 @@ router.get('/:id/owned', authenticate, (req, res, next) => {
 
 /**
  * GET /api/cards/:id/ownership-usage
- * Get comprehensive ownership and deck usage info for a card
+ * Get finish-aware ownership and deck usage info for a card
  */
 router.get('/:id/ownership-usage', authenticate, (req, res, next) => {
   try {
     const cardId = parseInt(req.params.id);
     const userId = req.user.id;
 
-    const data = getCardOwnershipAndUsage(userId, cardId);
+    const data = getCardOwnershipAndUsageFinishAware(userId, cardId);
     res.json(data);
   } catch (error) {
     next(error);
@@ -244,41 +278,19 @@ router.get('/:id/ownership-usage', authenticate, (req, res, next) => {
 });
 
 /**
- * POST /api/cards/printings/:printingId/swap
- * Atomically move owned copies to another printing
+ * GET /api/cards/:id
+ * Get card by ID with all printings
  */
-router.post('/printings/:printingId/swap', authenticate, (req, res, next) => {
+router.get('/:id', authenticate, (req, res, next) => {
   try {
-    const fromPrintingId = parseInt(req.params.printingId);
-    const toPrintingId = parseInt(req.body.replacementPrintingId);
+    const cardId = parseInt(req.params.id);
+    const card = getCardById(cardId);
 
-    if (!Number.isInteger(toPrintingId)) {
-      return res.status(400).json({ error: 'replacementPrintingId is required' });
+    if (!card) {
+      return res.status(404).json({ error: 'Card not found' });
     }
 
-    const result = swapOwnedPrinting(req.user.id, fromPrintingId, toPrintingId);
-    res.json(result);
-  } catch (error) {
-    next(error);
-  }
-});
-
-/**
- * POST /api/cards/printings/:printingId/quantity
- * Set owned quantity for a specific printing
- */
-router.post('/printings/:printingId/quantity', authenticate, (req, res, next) => {
-  try {
-    const printingId = parseInt(req.params.printingId);
-    const userId = req.user.id;
-    const { quantity } = req.body;
-
-    if (quantity === undefined || quantity === null) {
-      return res.status(400).json({ error: 'Quantity is required' });
-    }
-
-    const result = setOwnedPrintingQuantity(userId, printingId, parseInt(quantity));
-    res.json(result);
+    res.json({ card });
   } catch (error) {
     next(error);
   }
