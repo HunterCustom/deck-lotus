@@ -111,7 +111,6 @@ export function setOwnedPrintingQuantityFinishAware(
   quantity,
   requestedFinish = 'nonfoil'
 ) {
-  const finish = normalizeFinish(requestedFinish);
   const parsedQuantity = Number(quantity);
 
   if (!Number.isInteger(parsedQuantity)) {
@@ -120,6 +119,34 @@ export function setOwnedPrintingQuantityFinishAware(
 
   const printing = getPrinting(printingId);
   if (!printing) throw new Error('Printing not found');
+
+  const rawFinish = String(requestedFinish || 'nonfoil').toLowerCase();
+
+  // Legacy bulk-remove actions mean "remove this printing" rather than one
+  // finish. The client sends finish=all only for quantity <= 0 so both foil
+  // and nonfoil rows are removed safely.
+  if (rawFinish === 'all') {
+    if (parsedQuantity > 0) {
+      throw new Error('finish=all is only valid when removing a printing');
+    }
+
+    db.run(
+      `DELETE FROM owned_printings
+       WHERE user_id = ? AND printing_id = ?`,
+      [userId, printingId]
+    );
+    refreshOwnedCardCompatibility(userId, printing.card_id);
+
+    return {
+      success: true,
+      printingId,
+      finish: 'all',
+      quantity: 0,
+      message: 'All finishes removed from collection',
+    };
+  }
+
+  const finish = normalizeFinish(rawFinish);
   if (!printingSupportsFinish(printing, finish)) {
     throw new Error(`Printing does not support ${finish}`);
   }
