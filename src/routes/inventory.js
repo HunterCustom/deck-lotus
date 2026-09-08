@@ -1,12 +1,14 @@
 import express from 'express';
 import {
-  getInventory,
-  getInventoryStats,
   searchCardsForInventoryAdd,
   getOwnedSets,
 } from '../services/inventoryService.js';
+import {
+  getInventoryFinishAware,
+  getInventoryStatsFinishAware,
+} from '../services/finishAwareInventoryService.js';
 import { bulkAddToInventory } from '../services/inventoryBulkImportService.js';
-import { setOwnedPrintingQuantity } from '../services/cardService.js';
+import { setOwnedPrintingQuantityFinishAware } from '../services/finishAwareOwnershipService.js';
 import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -39,7 +41,7 @@ router.get('/', authenticate, (req, res, next) => {
       limit: parseInt(limit)
     };
 
-    const result = getInventory(req.user.id, filters);
+    const result = getInventoryFinishAware(req.user.id, filters);
     res.json(result);
   } catch (error) {
     next(error);
@@ -52,7 +54,7 @@ router.get('/', authenticate, (req, res, next) => {
  */
 router.get('/stats', authenticate, (req, res, next) => {
   try {
-    const stats = getInventoryStats(req.user.id);
+    const stats = getInventoryStatsFinishAware(req.user.id);
     res.json(stats);
   } catch (error) {
     next(error);
@@ -112,17 +114,22 @@ router.post('/bulk-add', authenticate, (req, res, next) => {
 
 /**
  * POST /api/inventory/quick-add
- * Quick-add a single card to inventory
+ * Quick-add a single nonfoil card to inventory
  */
 router.post('/quick-add', authenticate, (req, res, next) => {
   try {
-    const { printingId, quantity = 1 } = req.body;
+    const { printingId, quantity = 1, finish = 'nonfoil' } = req.body;
 
     if (!printingId) {
       return res.status(400).json({ error: 'printingId is required' });
     }
 
-    const result = setOwnedPrintingQuantity(req.user.id, printingId, quantity);
+    const result = setOwnedPrintingQuantityFinishAware(
+      req.user.id,
+      printingId,
+      quantity,
+      finish
+    );
     res.json(result);
   } catch (error) {
     next(error);
