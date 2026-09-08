@@ -61,7 +61,9 @@ function decorateOwnedPrintingRows() {
     }
 
     if (badge) {
-      badge.textContent = finishLabel(finish);
+      const label = finishLabel(finish);
+      if (badge.textContent !== label) badge.textContent = label;
+
       if (finish === 'foil') {
         badge.style.background = 'rgba(245, 158, 11, 0.18)';
         badge.style.color = '#f59e0b';
@@ -83,9 +85,10 @@ function decorateOwnedPrintingRows() {
 
     if (price) {
       const numericPrice = owned.price == null ? null : Number(owned.price);
-      price.textContent = Number.isFinite(numericPrice)
+      const priceText = Number.isFinite(numericPrice)
         ? ` • ${finishLabel(finish)} $${numericPrice.toFixed(2)}`
         : ` • ${finishLabel(finish)}`;
+      if (price.textContent !== priceText) price.textContent = priceText;
     }
 
     row.style.borderColor = finish === 'foil'
