@@ -44,6 +44,7 @@ function parseManaBoxDescriptor(rawCardName) {
 
 function normalizeBulkItem(item) {
   const parsed = parseManaBoxDescriptor(item?.cardName);
+  const explicitFinish = item?.finish ? String(item.finish).toLowerCase().trim() : null;
 
   return {
     cardName: parsed.cardName,
@@ -52,7 +53,7 @@ function normalizeBulkItem(item) {
       ? String(item.collectorNumber).trim()
       : parsed.collectorNumber,
     quantity: item?.quantity ?? 1,
-    isFoil: item?.isFoil === true || parsed.isFoil,
+    finish: explicitFinish || (item?.isFoil === true || parsed.isFoil ? 'foil' : 'nonfoil'),
   };
 }
 
@@ -76,7 +77,7 @@ function findCard(cardName) {
 function findPrinting(cardId, setCode, collectorNumber) {
   if (setCode && collectorNumber) {
     return db.get(
-      `SELECT id, set_code, collector_number
+      `SELECT id, set_code, collector_number, finishes
        FROM printings
        WHERE card_id = ?
          AND UPPER(set_code) = ?
@@ -88,7 +89,7 @@ function findPrinting(cardId, setCode, collectorNumber) {
 
   if (setCode) {
     return db.get(
-      `SELECT id, set_code, collector_number
+      `SELECT id, set_code, collector_number, finishes
        FROM printings
        WHERE card_id = ? AND UPPER(set_code) = ?
        ORDER BY collector_number
@@ -100,7 +101,7 @@ function findPrinting(cardId, setCode, collectorNumber) {
   // No printing was requested, so retain the existing behavior of choosing
   // the cheapest available TCGPlayer normal printing.
   return db.get(`
-    SELECT p.id, p.set_code, p.collector_number
+    SELECT p.id, p.set_code, p.collector_number, p.finishes
     FROM printings p
     WHERE p.card_id = ?
     ORDER BY
@@ -122,23 +123,27 @@ function findPrinting(cardId, setCode, collectorNumber) {
   `, [cardId]);
 }
 
+function printingSupportsFinish(printing, finish) {
+  if (!printing.finishes) return true;
+  const available = String(printing.finishes)
+    .split(',')
+    .map(value => value.trim().toLowerCase())
+    .filter(Boolean);
+  return available.includes(finish);
+}
+
 /**
- * Bulk-add inventory cards while preserving ManaBox printing identifiers.
+ * Bulk-add inventory cards while preserving ManaBox printing identifiers and
+ * finish markers. ManaBox marks foil cards with a trailing "*F*".
  *
- * The current client sends ManaBox lines such as
- * "Azog, Moria's Ruin (HOB) 61" as cardName, so parsing happens here as a
- * defensive backend step. Existing callers that send { cardName, setCode,
- * quantity } continue to work.
- *
- * Foil markers are recognized so they no longer break card matching. Deck
- * Lotus does not yet persist finish on owned_printings, so foil ownership is
- * reported in foilNotTracked until finish-aware ownership is migrated.
+ * Existing callers that send { cardName, setCode, quantity } continue to work
+ * and default to nonfoil ownership.
  */
 export function bulkAddToInventory(userId, items) {
   const results = {
     added: 0,
     failed: 0,
-    foilNotTracked: 0,
+    foilsAdded: 0,
     errors: [],
   };
 
@@ -150,6 +155,9 @@ export function bulkAddToInventory(userId, items) {
       if (!item.cardName) throw new Error('Card name is required');
       if (!Number.isInteger(quantity) || quantity <= 0) {
         throw new Error('Quantity must be a positive integer');
+      }
+      if (!['nonfoil', 'foil', 'etched'].includes(item.finish)) {
+        throw new Error(`Unsupported finish: ${item.finish}`);
       }
 
       const card = findCard(item.cardName);
@@ -168,9 +176,14 @@ export function bulkAddToInventory(userId, items) {
         throw new Error('Printing not found');
       }
 
+      if (!printingSupportsFinish(printing, item.finish)) {
+        throw new Error(`Printing does not support ${item.finish} finish`);
+      }
+
       const existing = db.get(
-        `SELECT id FROM owned_printings WHERE user_id = ? AND printing_id = ?`,
-        [userId, printing.id]
+        `SELECT id FROM owned_printings
+         WHERE user_id = ? AND printing_id = ? AND finish = ?`,
+        [userId, printing.id, item.finish]
       );
 
       if (existing) {
@@ -182,9 +195,9 @@ export function bulkAddToInventory(userId, items) {
         );
       } else {
         db.run(
-          `INSERT INTO owned_printings (user_id, printing_id, quantity)
-           VALUES (?, ?, ?)`,
-          [userId, printing.id, quantity]
+          `INSERT INTO owned_printings (user_id, printing_id, finish, quantity)
+           VALUES (?, ?, ?, ?)`,
+          [userId, printing.id, item.finish, quantity]
         );
       }
 
@@ -195,7 +208,7 @@ export function bulkAddToInventory(userId, items) {
       );
 
       results.added += quantity;
-      if (item.isFoil) results.foilNotTracked += quantity;
+      if (item.finish === 'foil') results.foilsAdded += quantity;
     } catch (error) {
       results.failed++;
       results.errors.push({
