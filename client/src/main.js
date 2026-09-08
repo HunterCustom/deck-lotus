@@ -9,6 +9,7 @@ import { setupInventory } from './components/inventory.js';
 import { setupSharedDeck, loadSharedDeck } from './components/sharedDeck.js';
 import { setupPriceMonitoring } from './components/priceMonitoring.js';
 import { setupUserMenu } from './components/userMenu.js';
+import { setupFinishAwareInventory } from './finishAwareInventory.js';
 import { showLoading, hideLoading } from './utils/ui.js';
 
 class App {
@@ -124,6 +125,7 @@ class App {
   }
 
   setupComponents() {
+    setupFinishAwareInventory();
     setupAuth(async (user) => {
       await this.showApp();
     });
